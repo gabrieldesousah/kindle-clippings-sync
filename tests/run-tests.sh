@@ -376,7 +376,7 @@ plist_get() { # plist_get arquivo expressao-python (d = dicionario do plist)
   python3 -c 'import plistlib,sys; d=plistlib.load(open(sys.argv[1],"rb")); print(eval(sys.argv[2]))' "$1" "$2"
 }
 cfg() { bash -c '. "$1"; eval "printf %s \"\$$2\""' _ "$ICFG" "$1"; }
-ienv bash "$REPO_DIR/install.sh" >"$TMP/install.out" 2>&1; rc=$?
+ienv KCS_HELPER_BUILD=0 bash "$REPO_DIR/install.sh" >"$TMP/install.out" 2>&1; rc=$? # sem compilar o helper
 check "install.sh sai com 0" [ "$rc" -eq 0 ]
 check "avisa que falta o libmtp e mostra o comando" grep -q 'brew install libmtp' "$TMP/install.out"
 check "script instalado e executavel" [ -x "$IHOME/.local/bin/kindle-clippings-sync" ]

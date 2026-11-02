@@ -461,8 +461,8 @@ mtp_pull() {
   fi
 
   # Preferencia: pai = documents na raiz; depois qualquer documents; depois o primeiro.
-  chosen="$(printf '%s\n' "$cands" | awk -F'\t' -v docs="$docs" '
-    BEGIN { n = split(docs, d, "\n"); for (i = 1; i <= n; i++) { split(d[i], f, "\t"); if (f[1] != "") lvl[f[1]] = f[2] } }
+  chosen="$(printf '%s\n' "$cands" | KCS_DOCS="$docs" awk -F'\t' '
+    BEGIN { n = split(ENVIRON["KCS_DOCS"], d, "\n"); for (i = 1; i <= n; i++) { split(d[i], f, "\t"); if (f[1] != "") lvl[f[1]] = f[2] } }
     { if ($2 in lvl) { score = (lvl[$2] == 0) ? 3 : 2 } else { score = 1 }
       if (score > best) { best = score; line = $0 } }
     END { print line }')"

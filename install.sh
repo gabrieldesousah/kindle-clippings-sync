@@ -180,9 +180,10 @@ if [ "$KCS_IOKIT_TRIGGER" = 1 ]; then
     [ -x "$HELPER_BIN" ] || { echo "erro: --helper-bin nao e executavel: $HELPER_BIN" >&2; exit 1; }
     cp "$HELPER_BIN" "$HELPER.tmp.$$" && chmod 755 "$HELPER.tmp.$$" && mv -f "$HELPER.tmp.$$" "$HELPER"
     USE_HELPER=1
-  elif [ "$(uname -s)" = Darwin ] && xcode-select -p >/dev/null 2>&1 && command -v cc >/dev/null 2>&1; then
-    echo "==> Compilando $HELPER"
-    if cc -O2 -Wall -o "$HELPER.tmp.$$" "$HELPER_SRC" 2>/tmp/kcs-helper-build.log; then
+  elif [ "${KCS_HELPER_BUILD:-1}" = 1 ] && [ "$(uname -s)" = Darwin ] && xcode-select -p >/dev/null 2>&1 &&
+    CC="$(xcrun --find clang 2>/dev/null || command -v /usr/bin/cc)" && [ -x "$CC" ]; then
+    echo "==> Compilando $HELPER ($CC)"
+    if "$CC" -O2 -Wall -o "$HELPER.tmp.$$" "$HELPER_SRC" 2>/tmp/kcs-helper-build.log; then
       mv -f "$HELPER.tmp.$$" "$HELPER"
       USE_HELPER=1
     else
