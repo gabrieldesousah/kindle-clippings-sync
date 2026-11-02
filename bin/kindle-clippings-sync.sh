@@ -1,52 +1,72 @@
 #!/bin/bash
 # kindle-clippings-sync: copia "documents/My Clippings.txt" do Kindle para o
-# cofre do Obsidian sempre que o Kindle e montado no Mac.
+# cofre do Obsidian sempre que o Kindle e conectado ao Mac.
 #
-# Compativel com o /bin/bash 3.2 do macOS. Usa apenas ferramentas do sistema
-# (shasum, cp, mv, mkdir, osascript). Nada de Homebrew ou python3.
+# Duas fontes, nesta ordem:
+#   1. MTP (Kindles recentes, que nao montam em /Volumes): detecta o aparelho
+#      com ioreg (barato) e so entao usa as ferramentas do libmtp (Homebrew).
+#   2. /Volumes (Kindles antigos, armazenamento USB): procura
+#      /Volumes/*/documents/My Clippings.txt.
+#
+# Compativel com o /bin/bash 3.2 do macOS.
 #
 # Uso: kindle-clippings-sync.sh [--now] [--force] [--help]
-#   --now    pula a espera inicial e as novas tentativas (execucao manual)
-#   --force  copia mesmo que o conteudo nao tenha mudado
+#   --now    sem espera inicial e ignora o "ja sincronizado nesta conexao"
+#   --force  copia mesmo que o conteudo nao tenha mudado (implica --now)
 #
 # Configuracao (arquivo de config ou variaveis de ambiente; o ambiente vence):
-#   KCS_VAULT          caminho do cofre do Obsidian
-#   KCS_DEST_SUBDIR    pasta dentro do cofre (padrao: 05 Conhecimento/Leituras/_Kindle)
-#   KCS_DEST           caminho absoluto do destino (ignora KCS_VAULT/KCS_DEST_SUBDIR)
-#   KCS_VOLUMES_ROOT   raiz dos volumes montados (padrao: /Volumes)
-#   KCS_LOG            arquivo de log (padrao: ~/Library/Logs/kindle-clippings-sync.log)
-#   KCS_STATE_DIR      estado interno: hash e lock
-#   KCS_MOUNT_DELAY    segundos de espera antes de procurar (padrao: 5)
-#   KCS_RETRIES        tentativas de encontrar o Kindle (padrao: 3)
-#   KCS_RETRY_INTERVAL segundos entre tentativas (padrao: 5)
-#   KCS_NOTIFY         1 para notificar via osascript, 0 para desligar (padrao: 1)
-#   KCS_REQUIRE_MARKER 1 exige marcador de Kindle no volume, 0 aceita qualquer (padrao: 1)
-#   KCS_MAX_BACKUPS    manter so os N backups mais recentes; 0 = manter todos (padrao: 0)
-#   KCS_CONFIG         arquivo de config (padrao: ~/.config/kindle-clippings-sync/config.env)
+#   KCS_VAULT               cofre do Obsidian
+#   KCS_DEST_SUBDIR         pasta dentro do cofre (padrao: 05 Conhecimento/Leituras/_Kindle)
+#   KCS_DEST                destino absoluto (ignora KCS_VAULT/KCS_DEST_SUBDIR)
+#   KCS_SOURCE              auto | mtp | volumes (padrao: auto)
+#   KCS_LOG                 arquivo de log (padrao: ~/Library/Logs/kindle-clippings-sync.log)
+#   KCS_STATE_DIR           estado interno: hash, sessao USB e lock
+#   KCS_NOTIFY              1 notifica via osascript, 0 desliga (padrao: 1)
+#   KCS_MAX_BACKUPS         manter so os N backups mais recentes; 0 = todos (padrao: 0)
+#  MTP:
+#   KCS_USB_VENDOR_ID       idVendor do Kindle em decimal (padrao: 6473 = 0x1949, Amazon)
+#   KCS_MTP_BIN_DIR         pasta das ferramentas mtp-* (padrao: PATH, /opt/homebrew/bin, /usr/local/bin)
+#   KCS_MTP_DELAY           segundos de espera apos detectar o aparelho (padrao: 3)
+#   KCS_MTP_RETRIES         tentativas se o MTP estiver ocupado (padrao: 4)
+#   KCS_MTP_RETRY_INTERVAL  segundos entre tentativas (padrao: 10)
+#   KCS_MTP_TIMEOUT         tempo maximo de cada comando mtp-* em segundos (padrao: 180)
+#   KCS_MTP_RESYNC_SECONDS  0 = uma vez por conexao; N = de novo apos N segundos conectado (padrao: 0)
+#   KCS_MTP_KILL_PTPCAMERAD 1 = encerra o ptpcamerad do macOS quando o MTP estiver ocupado (padrao: 0)
+#  /Volumes:
+#   KCS_VOLUMES_ROOT        raiz dos volumes (padrao: /Volumes)
+#   KCS_MOUNT_DELAY         segundos de espera apos uma montagem recente (padrao: 5)
+#   KCS_RETRIES             tentativas de encontrar o arquivo (padrao: 3)
+#   KCS_RETRY_INTERVAL      segundos entre tentativas (padrao: 5)
+#   KCS_MOUNT_WINDOW        so espera/tenta de novo se /Volumes mudou ha menos de N s (padrao: 90)
+#   KCS_REQUIRE_MARKER      1 exige marcador de Kindle no volume (padrao: 1)
+#   KCS_CONFIG              arquivo de config (padrao: ~/.config/kindle-clippings-sync/config.env)
 
 set -u
 umask 022
 
-VERSION="1.0.0"
-CLIPPINGS_REL="documents/My Clippings.txt"
+VERSION="2.0.0"
+CLIPPINGS_NAME="My Clippings.txt"
+CLIPPINGS_REL="documents/$CLIPPINGS_NAME"
 
-CONFIG_VARS="KCS_VAULT KCS_DEST_SUBDIR KCS_DEST KCS_VOLUMES_ROOT KCS_LOG KCS_STATE_DIR \
-KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_NOTIFY KCS_REQUIRE_MARKER KCS_MAX_BACKUPS"
+CONFIG_VARS="KCS_VAULT KCS_DEST_SUBDIR KCS_DEST KCS_SOURCE KCS_LOG KCS_STATE_DIR KCS_NOTIFY \
+KCS_MAX_BACKUPS KCS_USB_VENDOR_ID KCS_MTP_BIN_DIR KCS_MTP_DELAY KCS_MTP_RETRIES \
+KCS_MTP_RETRY_INTERVAL KCS_MTP_TIMEOUT KCS_MTP_RESYNC_SECONDS KCS_MTP_KILL_PTPCAMERAD \
+KCS_VOLUMES_ROOT KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_MOUNT_WINDOW KCS_REQUIRE_MARKER"
 
 FORCE=0
 NOW=0
 for arg in "$@"; do
   case "$arg" in
     --now|--run-now) NOW=1 ;;
-    --force) FORCE=1 ;;
+    --force) FORCE=1; NOW=1 ;;
     --version) echo "kindle-clippings-sync $VERSION"; exit 0 ;;
-    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opcao desconhecida: $arg" >&2; exit 2 ;;
   esac
 done
 
 # --- configuracao ----------------------------------------------------------
-# Guarda o que veio do ambiente para que tenha prioridade sobre o arquivo.
+# Guarda o que veio do ambiente para ter prioridade sobre o arquivo.
 for v in $CONFIG_VARS; do
   eval "__env_$v=\"\${$v-}\""
 done
@@ -66,20 +86,44 @@ done
 KCS_VAULT="${KCS_VAULT:-$HOME/Library/Mobile Documents/iCloud~md~obsidian/Documents}"
 KCS_DEST_SUBDIR="${KCS_DEST_SUBDIR:-05 Conhecimento/Leituras/_Kindle}"
 KCS_DEST="${KCS_DEST:-}"
-KCS_VOLUMES_ROOT="${KCS_VOLUMES_ROOT:-/Volumes}"
+KCS_SOURCE="${KCS_SOURCE:-auto}"
 KCS_LOG="${KCS_LOG:-$HOME/Library/Logs/kindle-clippings-sync.log}"
 KCS_STATE_DIR="${KCS_STATE_DIR:-$HOME/Library/Application Support/kindle-clippings-sync}"
+KCS_NOTIFY="${KCS_NOTIFY:-1}"
+KCS_MAX_BACKUPS="${KCS_MAX_BACKUPS:-0}"
+KCS_USB_VENDOR_ID="${KCS_USB_VENDOR_ID:-6473}"
+KCS_MTP_BIN_DIR="${KCS_MTP_BIN_DIR:-}"
+KCS_MTP_DELAY="${KCS_MTP_DELAY:-3}"
+KCS_MTP_RETRIES="${KCS_MTP_RETRIES:-4}"
+KCS_MTP_RETRY_INTERVAL="${KCS_MTP_RETRY_INTERVAL:-10}"
+KCS_MTP_TIMEOUT="${KCS_MTP_TIMEOUT:-180}"
+KCS_MTP_RESYNC_SECONDS="${KCS_MTP_RESYNC_SECONDS:-0}"
+KCS_MTP_KILL_PTPCAMERAD="${KCS_MTP_KILL_PTPCAMERAD:-0}"
+KCS_VOLUMES_ROOT="${KCS_VOLUMES_ROOT:-/Volumes}"
 KCS_MOUNT_DELAY="${KCS_MOUNT_DELAY:-5}"
 KCS_RETRIES="${KCS_RETRIES:-3}"
 KCS_RETRY_INTERVAL="${KCS_RETRY_INTERVAL:-5}"
-KCS_NOTIFY="${KCS_NOTIFY:-1}"
+KCS_MOUNT_WINDOW="${KCS_MOUNT_WINDOW:-90}"
 KCS_REQUIRE_MARKER="${KCS_REQUIRE_MARKER:-1}"
-KCS_MAX_BACKUPS="${KCS_MAX_BACKUPS:-0}"
 
 if [ "$NOW" = 1 ]; then
   KCS_MOUNT_DELAY=0
+  KCS_MTP_DELAY=0
   KCS_RETRIES=1
 fi
+
+LOCK="$KCS_STATE_DIR/lock"
+WORK=""
+HAVE_LOCK=0
+
+# shellcheck disable=SC2329 # chamada pelo trap
+cleanup() {
+  [ -n "$WORK" ] && rm -rf "$WORK"
+  [ "$HAVE_LOCK" = 1 ] && rm -rf "$LOCK"
+  return 0
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM HUP
 
 # --- utilitarios -----------------------------------------------------------
 log() {
@@ -106,6 +150,15 @@ sha256_of() {
   fi
 }
 
+file_size() { wc -c <"$1" 2>/dev/null | tr -d ' '; }
+
+mtime_of() {
+  case "$(uname -s)" in
+    Darwin|*BSD) stat -f %m "$1" 2>/dev/null ;;
+    *) stat -c %Y "$1" 2>/dev/null ;;
+  esac
+}
+
 # Escapa texto para uma string AppleScript entre aspas.
 as_escape() {
   printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
@@ -116,35 +169,39 @@ notify() {
   [ "$KCS_NOTIFY" = 1 ] || return 0
   command -v osascript >/dev/null 2>&1 || return 0
   osascript -e "display notification \"$(as_escape "$msg")\" with title \"$(as_escape "$title")\"" \
-    >/dev/null 2>&1 || log "aviso: falha ao exibir notificacao"
+    >/dev/null 2>&1 || log "aviso: falha ao exibir notificação"
 }
 
-# Um volume parece um Kindle? Tolerante: basta um dos marcadores.
-looks_like_kindle() {
-  local vol="$1" name
-  [ "$KCS_REQUIRE_MARKER" = 1 ] || return 0
-  name="$(basename "$vol" | tr '[:upper:]' '[:lower:]')"
-  case "$name" in *kindle*) return 0 ;; esac
-  [ -d "$vol/system" ] && return 0
-  [ -e "$vol/.kindle" ] && return 0
-  [ -e "$vol/system/version.txt" ] && return 0
-  [ -e "$vol/amazon-cover-bug" ] && return 0
-  [ -d "$vol/.active_content_sandbox" ] && return 0
-  return 1
+# Roda um comando com limite de tempo (o macOS nao tem `timeout`).
+run_with_timeout() {
+  local secs="$1" pid watcher rc
+  shift
+  "$@" &
+  pid=$!
+  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  watcher=$!
+  wait "$pid"
+  rc=$?
+  kill "$watcher" 2>/dev/null
+  wait "$watcher" 2>/dev/null
+  return "$rc"
 }
 
-# Imprime o caminho do primeiro "My Clippings.txt" de um Kindle montado.
-find_clippings() {
-  local f vol
-  for f in "$KCS_VOLUMES_ROOT"/*/"$CLIPPINGS_REL"; do
-    [ -f "$f" ] || continue
-    vol="${f%/"$CLIPPINGS_REL"}"
-    if looks_like_kindle "$vol"; then
-      printf '%s\n' "$f"
-      return 0
+acquire_lock() {
+  local other
+  mkdir -p "$KCS_STATE_DIR" 2>/dev/null || { log "erro: não consegui criar $KCS_STATE_DIR"; exit 1; }
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    other="$(cat "$LOCK/pid" 2>/dev/null)"
+    if [ -n "$other" ] && kill -0 "$other" 2>/dev/null; then
+      log "outra execução em andamento (pid $other); saindo"
+      exit 0
     fi
-  done
-  return 1
+    log "lock obsoleto removido (pid ${other:-?})"
+    rm -rf "$LOCK"
+    mkdir "$LOCK" 2>/dev/null || { log "não consegui obter o lock; saindo"; exit 0; }
+  fi
+  HAVE_LOCK=1
+  echo "$$" >"$LOCK/pid"
 }
 
 count_entries() {
@@ -170,7 +227,6 @@ prune_backups() {
   total="$(find "$dir" -maxdepth 1 -type f -name 'My Clippings *.txt' | wc -l | tr -d ' ')"
   extra=$((total - max))
   [ "$extra" -gt 0 ] || return 0
-  # Nomes com data ISO ordenam cronologicamente.
   find "$dir" -maxdepth 1 -type f -name 'My Clippings *.txt' | LC_ALL=C sort | head -n "$extra" |
     while IFS= read -r f; do rm -f "$f" && log "backup antigo removido: $(basename "$f")"; done
 }
@@ -210,123 +266,395 @@ NOTE
   mv -f "$tmp" "$note"
 }
 
+# Sincroniza um arquivo local (do volume ou baixado via MTP) com o cofre.
+# Requer o lock. Retorna 0 em sucesso ou "sem alteracoes".
+sync_file() {
+  local src="$1" origin="$2"
+  local dest dest_file backup_dir note_file state_hash src_hash last_hash tmp ok stamp backup entries nbackups
+
+  if [ -n "$KCS_DEST" ]; then
+    dest="$KCS_DEST"
+  else
+    if [ ! -d "$KCS_VAULT" ]; then
+      log "erro: cofre do Obsidian não encontrado: $KCS_VAULT"
+      notify "Cofre do Obsidian não encontrado. Veja o log." "Kindle: erro"
+      return 1
+    fi
+    dest="$KCS_VAULT/$KCS_DEST_SUBDIR"
+  fi
+  dest_file="$dest/$CLIPPINGS_NAME"
+  backup_dir="$dest/backups"
+  note_file="$dest/Kindle Sync.md"
+  state_hash="$KCS_STATE_DIR/last.sha256"
+
+  src_hash="$(sha256_of "$src")"
+  if [ -z "$src_hash" ]; then
+    log "erro: não consegui ler $src"
+    return 1
+  fi
+
+  last_hash="$(cat "$state_hash" 2>/dev/null)"
+  if [ "$FORCE" != 1 ] && [ "$src_hash" = "$last_hash" ] && [ -f "$dest_file" ] &&
+    [ "$(sha256_of "$dest_file")" = "$src_hash" ]; then
+    # Loga "sem alteracoes" uma vez por conteudo, para nao encher o log.
+    if [ "$(cat "$KCS_STATE_DIR/unchanged.logged" 2>/dev/null)" != "$src_hash" ] || [ -t 1 ]; then
+      log "sem alterações ($origin, sha256 ${src_hash:0:12})"
+      printf '%s\n' "$src_hash" >"$KCS_STATE_DIR/unchanged.logged"
+    fi
+    return 0
+  fi
+
+  if ! mkdir -p "$backup_dir" 2>/dev/null; then
+    log "erro: não consegui criar $backup_dir (permissão do iCloud Drive? veja o README)"
+    notify "Erro ao gravar no cofre. Veja o log." "Kindle: erro"
+    return 1
+  fi
+
+  # Copia para um temporario no destino, confere o hash e troca atomicamente.
+  tmp="$dest/.My Clippings.txt.tmp.$$"
+  ok=0
+  for _ in 1 2 3; do
+    if cp "$src" "$tmp" 2>>"$KCS_LOG" && [ "$(sha256_of "$tmp")" = "$src_hash" ]; then
+      ok=1
+      break
+    fi
+    sleep 1
+    src_hash="$(sha256_of "$src")"
+  done
+  if [ "$ok" != 1 ]; then
+    rm -f "$tmp"
+    log "erro: falha ao copiar $origin para $dest (permissão? veja o README)"
+    notify "Erro ao copiar os destaques. Veja o log." "Kindle: erro"
+    return 1
+  fi
+  mv -f "$tmp" "$dest_file"
+
+  stamp="$(date '+%Y-%m-%d %H%M%S')"
+  backup="$(backup_path "$backup_dir" "$stamp")"
+  cp "$dest_file" "$backup" || log "aviso: falha ao criar backup $backup"
+  prune_backups "$backup_dir" "$KCS_MAX_BACKUPS"
+
+  entries="$(count_entries "$dest_file")"
+  nbackups="$(find "$backup_dir" -maxdepth 1 -type f -name 'My Clippings *.txt' | wc -l | tr -d ' ')"
+  write_note "$note_file" "$entries" "$origin" "$src_hash" "$nbackups" \
+    "$(date '+%Y-%m-%dT%H:%M:%S')" "$(date '+%d/%m/%Y')" "$(date '+%H:%M:%S')"
+
+  printf '%s\n' "$src_hash" >"$state_hash"
+  rm -f "$KCS_STATE_DIR/unchanged.logged"
+
+  log "sincronizado: $entries entradas de $origin para $dest_file (backup: $(basename "$backup"))"
+  if [ "$entries" = 1 ]; then
+    notify "Kindle sincronizado: 1 destaque" "Kindle"
+  else
+    notify "Kindle sincronizado: $entries destaques" "Kindle"
+  fi
+  return 0
+}
+
+# --- MTP --------------------------------------------------------------------
+find_ioreg() {
+  if command -v ioreg >/dev/null 2>&1; then command -v ioreg; return 0; fi
+  [ -x /usr/sbin/ioreg ] && { echo /usr/sbin/ioreg; return 0; }
+  return 1
+}
+
+# Lista Kindles no plano IOUSB: "vendor<TAB>product<TAB>chave<TAB>nome".
+# A chave e o sessionID (muda a cada conexao) ou, na falta dele, o locationID.
+usb_kindles() {
+  local ioreg
+  ioreg="$(find_ioreg)" || return 1
+  "$ioreg" -p IOUSB -l -w0 2>/dev/null | awk -v vid="$KCS_USB_VENDOR_ID" '
+    function val(s, key) { sub(".*\"" key "\" = ", "", s); gsub(/^"|"$/, "", s); return s }
+    function flush() {
+      if (node != "" && cls ~ /^IOUSB(Host)?Device$/ &&
+          (vendor == vid || tolower(node " " pname " " vname) ~ /kindle/)) {
+        key = (sess != "") ? sess : vendor ":" product ":" loc
+        print vendor "\t" product "\t" key "\t" ((pname != "") ? pname : node)
+      }
+      node = ""; cls = ""; vendor = ""; product = ""; sess = ""; loc = ""; pname = ""; vname = ""
+    }
+    /\+-o / {
+      flush()
+      line = $0; sub(/^.*\+-o /, "", line)
+      p = index(line, "  <class ")
+      if (p == 0) next
+      node = substr(line, 1, p - 1); sub(/@[0-9a-fA-F]+$/, "", node)
+      cls = substr(line, p + 9); sub(/,.*/, "", cls); sub(/>.*/, "", cls)
+      next
+    }
+    /"idVendor" = /          { vendor = val($0, "idVendor") + 0; next }
+    /"idProduct" = /         { product = val($0, "idProduct") + 0; next }
+    /"sessionID" = /         { sess = val($0, "sessionID"); next }
+    /"locationID" = /        { loc = val($0, "locationID"); next }
+    /"USB Product Name" = /  { pname = val($0, "USB Product Name"); next }
+    /"USB Vendor Name" = /   { vname = val($0, "USB Vendor Name"); next }
+    END { flush() }'
+}
+
+find_mtp_tool() {
+  local name="$1" d
+  if [ -n "$KCS_MTP_BIN_DIR" ]; then
+    [ -x "$KCS_MTP_BIN_DIR/$name" ] && { echo "$KCS_MTP_BIN_DIR/$name"; return 0; }
+    return 1
+  fi
+  if command -v "$name" >/dev/null 2>&1; then command -v "$name"; return 0; fi
+  for d in /opt/homebrew/bin /usr/local/bin; do
+    [ -x "$d/$name" ] && { echo "$d/$name"; return 0; }
+  done
+  return 1
+}
+
+# A saida de um comando mtp-* indica aparelho ocupado/indisponivel?
+mtp_busy() {
+  grep -Eqi 'busy|claim_interface|Unable to open raw device|PANIC|error connecting|No Devices have been found|no devices found|No raw devices found|^No devices\.|Error getting file' "$1"
+}
+
+# Processos que costumam segurar o Kindle via MTP. Usa o caminho completo do
+# executavel (ps comm), porque o pgrep do macOS so ve 16 caracteres do nome.
+mtp_holders() {
+  local p found="" list
+  list="$(ps -axo comm= 2>/dev/null)"
+  [ -n "$list" ] || return 0
+  for p in "Android File Transfer" "Android File Transfer Agent" "OpenMTP" "MacDroid" \
+    "Kindle" "Send to Kindle" "Image Capture" "Photos" "ptpcamerad"; do
+    if printf '%s\n' "$list" | grep -q -e "/$p\$" -e "^$p\$"; then found="${found:+$found, }$p"; fi
+  done
+  printf '%s\n' "$found"
+}
+
+# Baixa My Clippings.txt via MTP para "$1".
+# Retorno: 0 ok, 2 ocupado/indisponivel, 3 arquivo nao existe no aparelho, 1 outro erro.
+mtp_pull() {
+  local out="$1" files_txt="$WORK/mtp-files.txt" folders_txt="$WORK/mtp-folders.txt"
+  local get_txt="$WORK/mtp-getfile.txt" docs cands chosen id size got rc
+
+  run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_FILES" >"$files_txt" 2>&1 </dev/null
+  rc=$?
+  if [ "$rc" -gt 128 ]; then log "mtp-files excedeu ${KCS_MTP_TIMEOUT}s"; return 2; fi
+  # Avisos do libusb podem aparecer mesmo com sucesso: so e "ocupado" se nada foi listado.
+  if ! grep -q '^File ID: ' "$files_txt" && mtp_busy "$files_txt"; then return 2; fi
+
+  # Arquivos chamados My Clippings.txt: "id<TAB>parent<TAB>tamanho".
+  cands="$(awk -v want="$(printf '%s' "$CLIPPINGS_NAME" | tr '[:upper:]' '[:lower:]')" '
+    function emit() { if (id != "" && tolower(name) == want) print id "\t" parent "\t" size }
+    /^File ID: /           { emit(); id = $3; name = ""; parent = ""; size = ""; next }
+    /^[ \t]*Filename: /    { s = $0; sub(/^[ \t]*Filename: /, "", s); sub(/\r$/, "", s); name = s; next }
+    /^[ \t]*File size /    { size = $3; next }
+    /^[ \t]*Parent ID: /   { parent = $3; next }
+    END { emit() }' "$files_txt")"
+  if [ -z "$cands" ]; then
+    if grep -q '^File ID: ' "$files_txt"; then return 3; fi
+    log "mtp-files não listou nenhum arquivo"
+    return 2
+  fi
+
+  # Pastas "documents": "id<TAB>nivel" (nivel 0 = raiz do armazenamento).
+  docs=""
+  if [ -n "$MTP_FOLDERS" ]; then
+    run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_FOLDERS" >"$folders_txt" 2>&1 </dev/null
+    rc=$?
+    if [ "$rc" -gt 128 ]; then log "mtp-folders excedeu ${KCS_MTP_TIMEOUT}s"; return 2; fi
+    if ! grep -Eq '^[0-9]+	' "$folders_txt" && mtp_busy "$folders_txt"; then return 2; fi
+    docs="$(awk -F'\t' '/^[0-9]+\t/ {
+        n = $2; sub(/\r$/, "", n); m = match(n, /[^ ]/); lvl = (m > 0) ? int((m - 1) / 2) : 0
+        sub(/^ +/, "", n); if (tolower(n) == "documents") print $1 "\t" lvl }' "$folders_txt")"
+  fi
+
+  # Preferencia: pai = documents na raiz; depois qualquer documents; depois o primeiro.
+  chosen="$(printf '%s\n' "$cands" | awk -F'\t' -v docs="$docs" '
+    BEGIN { n = split(docs, d, "\n"); for (i = 1; i <= n; i++) { split(d[i], f, "\t"); if (f[1] != "") lvl[f[1]] = f[2] } }
+    { if ($2 in lvl) { score = (lvl[$2] == 0) ? 3 : 2 } else { score = 1 }
+      if (score > best) { best = score; line = $0 } }
+    END { print line }')"
+  id="$(printf '%s' "$chosen" | cut -f1)"
+  size="$(printf '%s' "$chosen" | cut -f3)"
+  [ "$(printf '%s\n' "$cands" | wc -l | tr -d ' ')" -gt 1 ] &&
+    log "vários $CLIPPINGS_NAME no Kindle; usando o item $id (pasta documents preferida)"
+  if [ -z "$docs" ] || ! printf '%s\n' "$docs" | cut -f1 | grep -qx "$(printf '%s' "$chosen" | cut -f2)"; then
+    log "aviso: não confirmei a pasta documents; usando o item $id"
+  fi
+
+  rm -f "$out"
+  run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_GETFILE" "$id" "$out" >"$get_txt" 2>&1 </dev/null
+  rc=$?
+  if [ "$rc" -gt 128 ]; then log "mtp-getfile excedeu ${KCS_MTP_TIMEOUT}s"; return 2; fi
+  if [ "$rc" -ne 0 ] || [ ! -f "$out" ]; then
+    mtp_busy "$get_txt" && return 2
+    log "mtp-getfile falhou (código $rc): $(tr '\n' ' ' <"$get_txt" | cut -c1-300)"
+    return 1
+  fi
+  got="$(file_size "$out")"
+  if [ -n "$size" ] && [ "$got" != "$size" ]; then
+    log "download incompleto: $got de $size bytes"
+    return 1
+  fi
+  return 0
+}
+
+run_mtp() {
+  local info key name session_file now last_key last_time rc attempt holders tmpfile
+
+  info="$(usb_kindles | head -n 1)"
+  [ -n "$info" ] || return 10 # nenhum Kindle no USB
+  key="$(printf '%s' "$info" | cut -f3)"
+  name="$(printf '%s' "$info" | cut -f4)"
+  session_file="$KCS_STATE_DIR/mtp-session"
+  now="$(date +%s)"
+
+  # Ja sincronizado nesta conexao? Sai sem abrir o MTP (barato para o StartInterval
+  # e para disparos repetidos do evento de IOKit).
+  if [ "$NOW" != 1 ] && [ -f "$session_file" ]; then
+    last_key="$(cut -f1 <"$session_file")"
+    last_time="$(cut -f2 <"$session_file")"
+    if [ "$last_key" = "$key" ]; then
+      if [ "$KCS_MTP_RESYNC_SECONDS" -le 0 ] 2>/dev/null ||
+        [ $((now - ${last_time:-0})) -lt "$KCS_MTP_RESYNC_SECONDS" ]; then
+        return 0
+      fi
+    fi
+  fi
+
+  acquire_lock
+
+  # Ja falhou nesta conexao (aparelho ocupado)? Nas rodadas automaticas seguintes
+  # tenta so uma vez, para nao segurar o job nem encher o log.
+  if [ "$NOW" != 1 ] && [ "$(cat "$KCS_STATE_DIR/mtp-failed" 2>/dev/null)" = "$key" ]; then
+    KCS_MTP_RETRIES=1
+  fi
+
+  MTP_FILES="$(find_mtp_tool mtp-files)"
+  MTP_GETFILE="$(find_mtp_tool mtp-getfile)"
+  MTP_FOLDERS="$(find_mtp_tool mtp-folders)"
+  if [ -z "$MTP_FILES" ] || [ -z "$MTP_GETFILE" ]; then
+    log "erro: $name conectado via MTP, mas o libmtp não foi encontrado (procurei no PATH, /opt/homebrew/bin e /usr/local/bin). Rode: brew install libmtp"
+    if [ "$(cat "$KCS_STATE_DIR/mtp-notified" 2>/dev/null)" != "$key" ]; then
+      notify "Instale o libmtp: brew install libmtp" "Kindle: erro"
+      printf '%s\n' "$key" >"$KCS_STATE_DIR/mtp-notified"
+    fi
+    return 1
+  fi
+  [ -z "$MTP_FOLDERS" ] && log "aviso: mtp-folders não encontrado; não dá para confirmar a pasta documents"
+
+  [ "$KCS_MTP_DELAY" -gt 0 ] 2>/dev/null && sleep "$KCS_MTP_DELAY"
+
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/kcs-mtp.XXXXXX")" || { log "erro: mktemp falhou"; return 1; }
+  tmpfile="$WORK/$CLIPPINGS_NAME"
+  log "$name detectado via USB/MTP; baixando $CLIPPINGS_REL"
+
+  attempt=1
+  while :; do
+    mtp_pull "$tmpfile"
+    rc=$?
+    [ "$rc" -eq 0 ] && break
+    if [ "$rc" -eq 3 ]; then
+      log "$CLIPPINGS_NAME não existe no $name (nenhum destaque ainda?)"
+      printf '%s\t%s\n' "$key" "$now" >"$session_file"
+      return 0
+    fi
+    if [ "$rc" -eq 2 ]; then
+      holders="$(mtp_holders)"
+      log "Kindle ocupado ou indisponível via MTP (tentativa $attempt/$KCS_MTP_RETRIES). Outro app pode estar usando o aparelho${holders:+: $holders}. Saída: $(cat "$WORK"/mtp-*.txt 2>/dev/null | grep -Ei 'busy|claim|PANIC|Unable|error|No dev|No raw' | head -n 3 | tr '\n' ' ')"
+      if [ "$KCS_MTP_KILL_PTPCAMERAD" = 1 ] && command -v killall >/dev/null 2>&1; then
+        killall ptpcamerad >/dev/null 2>&1 && log "ptpcamerad encerrado para liberar o MTP"
+      fi
+    fi
+    [ "$attempt" -ge "$KCS_MTP_RETRIES" ] && break
+    attempt=$((attempt + 1))
+    sleep "$KCS_MTP_RETRY_INTERVAL"
+  done
+
+  if [ "$rc" -ne 0 ]; then
+    printf '%s\n' "$key" >"$KCS_STATE_DIR/mtp-failed"
+    log "erro: não consegui baixar $CLIPPINGS_REL via MTP após $KCS_MTP_RETRIES tentativas. Feche Android File Transfer, OpenMTP, o app Kindle ou a Captura de Imagem e reconecte (ou rode: kindle-clippings-sync --now)"
+    if [ "$(cat "$KCS_STATE_DIR/mtp-notified" 2>/dev/null)" != "$key" ]; then
+      notify "Kindle ocupado por outro app. Feche o Android File Transfer e reconecte." "Kindle: erro"
+      printf '%s\n' "$key" >"$KCS_STATE_DIR/mtp-notified"
+    fi
+    return 1
+  fi
+
+  sync_file "$tmpfile" "MTP ($name): $CLIPPINGS_REL"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\t%s\n' "$key" "$now" >"$session_file"
+    rm -f "$KCS_STATE_DIR/mtp-failed"
+  fi
+  return "$rc"
+}
+
+# --- /Volumes ---------------------------------------------------------------
+# Um volume parece um Kindle? Tolerante: basta um dos marcadores.
+looks_like_kindle() {
+  local vol="$1" name
+  [ "$KCS_REQUIRE_MARKER" = 1 ] || return 0
+  name="$(basename "$vol" | tr '[:upper:]' '[:lower:]')"
+  case "$name" in *kindle*) return 0 ;; esac
+  [ -d "$vol/system" ] && return 0
+  [ -e "$vol/.kindle" ] && return 0
+  [ -e "$vol/system/version.txt" ] && return 0
+  [ -e "$vol/amazon-cover-bug" ] && return 0
+  [ -d "$vol/.active_content_sandbox" ] && return 0
+  return 1
+}
+
+find_clippings() {
+  local f vol
+  for f in "$KCS_VOLUMES_ROOT"/*/"$CLIPPINGS_REL"; do
+    [ -f "$f" ] || continue
+    vol="${f%/"$CLIPPINGS_REL"}"
+    if looks_like_kindle "$vol"; then
+      printf '%s\n' "$f"
+      return 0
+    fi
+  done
+  return 1
+}
+
+run_volumes() {
+  local src attempt mt now
+  [ -d "$KCS_VOLUMES_ROOT" ] || return 0
+  if ! ls "$KCS_VOLUMES_ROOT" >/dev/null 2>&1; then
+    log "erro: sem permissão para listar $KCS_VOLUMES_ROOT (verifique Volumes Removíveis / Acesso Total ao Disco para /bin/bash)"
+    return 1
+  fi
+
+  src="$(find_clippings)"
+  if [ -z "$src" ]; then
+    # So vale esperar se algo acabou de ser montado (disparo por StartOnMount).
+    mt="$(mtime_of "$KCS_VOLUMES_ROOT")"
+    now="$(date +%s)"
+    if [ "$NOW" != 1 ] && [ -n "$mt" ] && [ $((now - mt)) -le "$KCS_MOUNT_WINDOW" ]; then
+      [ "$KCS_MOUNT_DELAY" -gt 0 ] 2>/dev/null && sleep "$KCS_MOUNT_DELAY"
+      attempt=1
+      while :; do
+        src="$(find_clippings)" && break
+        src=""
+        [ "$attempt" -ge "$KCS_RETRIES" ] && break
+        attempt=$((attempt + 1))
+        sleep "$KCS_RETRY_INTERVAL"
+      done
+    fi
+  fi
+  [ -n "$src" ] || return 0 # nenhum Kindle: sai em silencio
+
+  acquire_lock
+  sync_file "$src" "$src"
+}
+
 # --- execucao ---------------------------------------------------------------
 mkdir -p "$(dirname "$KCS_LOG")" 2>/dev/null
 rotate_log
 
-if [ "$KCS_MOUNT_DELAY" -gt 0 ] 2>/dev/null; then
-  sleep "$KCS_MOUNT_DELAY"
-fi
+case "$KCS_SOURCE" in
+  auto|mtp)
+    run_mtp
+    rc=$?
+    if [ "$rc" -ne 10 ]; then exit "$rc"; fi
+    [ "$KCS_SOURCE" = mtp ] && exit 0
+    ;;
+  volumes) ;;
+  *) log "erro: KCS_SOURCE inválido: $KCS_SOURCE (use auto, mtp ou volumes)"; exit 2 ;;
+esac
 
-if [ ! -d "$KCS_VOLUMES_ROOT" ]; then
-  exit 0
-fi
-if ! ls "$KCS_VOLUMES_ROOT" >/dev/null 2>&1; then
-  log "erro: sem permissão para listar $KCS_VOLUMES_ROOT (verifique Volumes Removíveis / Acesso Total ao Disco para /bin/bash)"
-  exit 1
-fi
-
-SRC=""
-attempt=1
-while :; do
-  SRC="$(find_clippings)" && break
-  SRC=""
-  [ "$attempt" -ge "$KCS_RETRIES" ] && break
-  attempt=$((attempt + 1))
-  sleep "$KCS_RETRY_INTERVAL"
-done
-
-if [ -z "$SRC" ]; then
-  # Nenhum Kindle: sair em silencio (o launchd dispara em qualquer montagem).
-  exit 0
-fi
-
-# Lock por mkdir (atomico, existe em qualquer Unix; flock nao vem no macOS).
-mkdir -p "$KCS_STATE_DIR" 2>/dev/null || { log "erro: não consegui criar $KCS_STATE_DIR"; exit 1; }
-LOCK="$KCS_STATE_DIR/lock"
-if ! mkdir "$LOCK" 2>/dev/null; then
-  other="$(cat "$LOCK/pid" 2>/dev/null)"
-  if [ -n "$other" ] && kill -0 "$other" 2>/dev/null; then
-    log "outra execução em andamento (pid $other); saindo"
-    exit 0
-  fi
-  log "lock obsoleto removido (pid ${other:-?})"
-  rm -rf "$LOCK"
-  mkdir "$LOCK" 2>/dev/null || { log "não consegui obter o lock; saindo"; exit 0; }
-fi
-echo "$$" >"$LOCK/pid"
-trap 'rm -rf "$LOCK"' EXIT
-trap 'exit 1' INT TERM HUP
-
-if [ -n "$KCS_DEST" ]; then
-  DEST="$KCS_DEST"
-else
-  if [ ! -d "$KCS_VAULT" ]; then
-    log "erro: cofre do Obsidian não encontrado: $KCS_VAULT"
-    notify "Cofre do Obsidian não encontrado. Veja o log." "Kindle: erro"
-    exit 1
-  fi
-  DEST="$KCS_VAULT/$KCS_DEST_SUBDIR"
-fi
-DEST_FILE="$DEST/My Clippings.txt"
-BACKUP_DIR="$DEST/backups"
-NOTE_FILE="$DEST/Kindle Sync.md"
-STATE_HASH="$KCS_STATE_DIR/last.sha256"
-
-SRC_HASH="$(sha256_of "$SRC")"
-if [ -z "$SRC_HASH" ]; then
-  log "erro: não consegui ler $SRC"
-  exit 1
-fi
-
-LAST_HASH="$(cat "$STATE_HASH" 2>/dev/null)"
-if [ "$FORCE" != 1 ] && [ "$SRC_HASH" = "$LAST_HASH" ] && [ -f "$DEST_FILE" ] &&
-  [ "$(sha256_of "$DEST_FILE")" = "$SRC_HASH" ]; then
-  log "sem alterações ($SRC, sha256 ${SRC_HASH:0:12})"
-  exit 0
-fi
-
-if ! mkdir -p "$BACKUP_DIR" 2>/dev/null; then
-  log "erro: não consegui criar $BACKUP_DIR (permissão do iCloud Drive? veja o README)"
-  notify "Erro ao gravar no cofre. Veja o log." "Kindle: erro"
-  exit 1
-fi
-
-# Copia para um temporario no destino, confere o hash e troca atomicamente.
-TMP="$DEST/.My Clippings.txt.tmp.$$"
-ok=0
-for _ in 1 2 3; do
-  if cp "$SRC" "$TMP" 2>>"$KCS_LOG" && [ "$(sha256_of "$TMP")" = "$SRC_HASH" ]; then
-    ok=1
-    break
-  fi
-  sleep 1
-  SRC_HASH="$(sha256_of "$SRC")"
-done
-if [ "$ok" != 1 ]; then
-  rm -f "$TMP"
-  log "erro: falha ao copiar $SRC para $DEST (permissão? veja o README)"
-  notify "Erro ao copiar os destaques. Veja o log." "Kindle: erro"
-  exit 1
-fi
-mv -f "$TMP" "$DEST_FILE"
-
-STAMP="$(date '+%Y-%m-%d %H%M%S')"
-BACKUP="$(backup_path "$BACKUP_DIR" "$STAMP")"
-cp "$DEST_FILE" "$BACKUP" || log "aviso: falha ao criar backup $BACKUP"
-prune_backups "$BACKUP_DIR" "$KCS_MAX_BACKUPS"
-
-ENTRIES="$(count_entries "$DEST_FILE")"
-NBACKUPS="$(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'My Clippings *.txt' | wc -l | tr -d ' ')"
-write_note "$NOTE_FILE" "$ENTRIES" "$SRC" "$SRC_HASH" "$NBACKUPS" \
-  "$(date '+%Y-%m-%dT%H:%M:%S')" "$(date '+%d/%m/%Y')" "$(date '+%H:%M:%S')"
-
-printf '%s\n' "$SRC_HASH" >"$STATE_HASH"
-
-log "sincronizado: $ENTRIES entradas de $SRC para $DEST_FILE (backup: $(basename "$BACKUP"))"
-if [ "$ENTRIES" = 1 ]; then
-  notify "Kindle sincronizado: 1 destaque" "Kindle"
-else
-  notify "Kindle sincronizado: $ENTRIES destaques" "Kindle"
-fi
-exit 0
+run_volumes
+exit $?

@@ -1,0 +1,10 @@
+#!/bin/bash
+# shellcheck source=tests/fakes/mtp-common.sh
+. "$(dirname "$0")/mtp-common.sh"
+fake_prelude mtp-detect
+printf 'libmtp version: 1.1.22\n\n'
+echo "Listing raw device(s)"
+if [ -e "$FAKE_DIR/nodevice" ]; then echo "   No raw devices found."; exit 0; fi
+echo "   Found 1 device(s):"
+echo "   Amazon: Kindle Scribe 32GB (1949:9981) @ bus 0, dev 2"
+echo "Attempting to connect device(s)"

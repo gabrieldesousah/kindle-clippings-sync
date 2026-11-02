@@ -30,6 +30,7 @@ fi
 
 echo "==> Removendo $PLIST e $PREFIX/kindle-clippings-sync"
 rm -f "$PLIST" "$PREFIX/kindle-clippings-sync"
+rm -rf "$HOME/.local/libexec/kindle-clippings-sync"
 
 if [ "$PURGE" = 1 ]; then
   echo "==> Removendo config, estado e log"

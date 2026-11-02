@@ -1,0 +1,17 @@
+#!/bin/bash
+# shellcheck source=tests/fakes/mtp-common.sh
+. "$(dirname "$0")/mtp-common.sh"
+fake_prelude "mtp-getfile $*"
+printf 'libmtp version: 1.1.22\n\n'
+if [ -e "$FAKE_DIR/nodevice" ] || [ -e "$FAKE_DIR/getfile-nodev" ]; then echo "No devices."; exit 0; fi
+fake_unknown_warning
+if fake_busy; then echo "No devices."; exit 0; fi
+if [ $# -eq 3 ]; then shift; fi # [SN:xxx] <id> <arquivo>
+if [ $# -ne 2 ]; then echo "getfile [<deviceid> | SN:<serialnumber>] <fileid/trackid> <filename>" >&2; exit 0; fi
+id="$1"; dest="$2"
+echo "Getting file/track $id to local file $dest"
+src="$(awk -F'\t' -v id="$id" '$1 == id { print $4 }' "$FAKE_DIR/manifest")"
+if [ -z "$src" ]; then printf '\nError getting file from MTP device.\n'; exit 1; fi
+cp "$src" "$dest"
+size="$(wc -c <"$src" | tr -d ' ')"
+printf 'Progress: %s of %s (100%%)\n' "$size" "$size"

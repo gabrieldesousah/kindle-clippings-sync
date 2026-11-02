@@ -1,0 +1,63 @@
+#!/bin/bash
+# ioreg falso: imita `ioreg -p IOUSB -l -w0` de um Mac Apple Silicon.
+# Estado em $FAKE_DIR: ioreg-mode (none|kindle), session (sessionID).
+mode="$(cat "$FAKE_DIR/ioreg-mode" 2>/dev/null || echo none)"
+session="$(cat "$FAKE_DIR/session" 2>/dev/null || echo 1234567890123)"
+echo "ioreg $*" >>"$FAKE_DIR/calls"
+cat <<'OUT'
++-o Root  <class IORegistryEntry, id 0x100000100, retain 31>
+  +-o AppleT8122USBXHCI@00000000  <class AppleT8122USBXHCI, id 0x1000003a1, registered, matched, active, busy 0 (0 ms), retain 46>
+  | {
+  |   "IOClass" = "AppleT8122USBXHCI"
+  |   "locationID" = 0
+  | }
+  | 
+  +-o AppleT8122USBXHCI@01000000  <class AppleT8122USBXHCI, id 0x1000003b2, registered, matched, active, busy 0 (0 ms), retain 52>
+    | {
+    |   "IOClass" = "AppleT8122USBXHCI"
+    |   "locationID" = 16777216
+    | }
+    | 
+    +-o USB2.1 Hub@01100000  <class IOUSBHostDevice, id 0x100000c41, registered, matched, active, busy 0 (2 ms), retain 30>
+    | | {
+    | |   "sessionID" = 987654321000
+    | |   "idProduct" = 2321
+    | |   "USB Product Name" = "USB2.1 Hub"
+    | |   "locationID" = 17825792
+    | |   "idVendor" = 3141
+    | |   "USB Vendor Name" = "GenesysLogic"
+    | | }
+    | | 
+    | +-o Magic Keyboard@01110000  <class IOUSBHostDevice, id 0x100000c62, registered, matched, active, busy 0 (1 ms), retain 22>
+    |     {
+    |       "sessionID" = 987654322000
+    |       "idProduct" = 615
+    |       "USB Product Name" = "Magic Keyboard"
+    |       "locationID" = 17891328
+    |       "idVendor" = 1452
+    |       "USB Vendor Name" = "Apple Inc."
+    |     }
+    |     
+OUT
+if [ "$mode" = kindle ]; then
+  cat <<OUT
+    +-o Kindle Paperwhite@01200000  <class IOUSBHostDevice, id 0x100000d13, registered, matched, active, busy 0 (12 ms), retain 24>
+        {
+          "sessionID" = $session
+          "USBSpeed" = 3
+          "idProduct" = 39297
+          "iManufacturer" = 1
+          "bDeviceClass" = 0
+          "bcdDevice" = 547
+          "USB Product Name" = "Kindle Paperwhite"
+          "locationID" = 18874368
+          "kUSBProductString" = "Kindle Paperwhite"
+          "idVendor" = 6473
+          "kUSBVendorString" = "Amazon"
+          "USB Vendor Name" = "Amazon"
+          "USB Serial Number" = "G000AB0000000000"
+          "IOCFPlugInTypes" = {"9dc7b780-9ec0-11d4-a54f-000a27052861"="IOUSBHostFamily.kext/Contents/PlugIns/IOUSBLib.bundle"}
+        }
+        
+OUT
+fi

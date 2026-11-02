@@ -1,0 +1,22 @@
+#!/bin/bash
+# shellcheck source=tests/fakes/mtp-common.sh
+. "$(dirname "$0")/mtp-common.sh"
+fake_prelude mtp-files
+printf 'libmtp version: 1.1.22\n\n'
+if [ -e "$FAKE_DIR/nodevice" ]; then echo "mtp-files: No Devices have been found"; exit 0; fi
+fake_unknown_warning
+echo "mtp-files: Successfully connected"
+if fake_busy; then echo "OK."; exit 0; fi
+echo "Listing File Information on Device with name: Kindle Paperwhite [SN:G000AB0000000000]"
+while IFS="$(printf '\t')" read -r id parent name src; do
+  [ -n "$id" ] || continue
+  size="$(wc -c <"$src" | tr -d ' ')"
+  printf 'File ID: %u\n' "$id"
+  printf '   Filename: %s\n' "$name"
+  printf '   File size %llu (0x%016llX) bytes\n' "$size" "$size"
+  printf '   Parent ID: %u\n' "$parent"
+  printf '   Storage ID: 0x%08X\n' 65537
+  case "$name" in *.txt) ft="Text file" ;; *) ft="Undefined filetype" ;; esac
+  printf '   Filetype: %s\n' "$ft"
+done <"$FAKE_DIR/manifest"
+echo "OK."

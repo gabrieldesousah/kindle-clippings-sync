@@ -1,0 +1,3 @@
+#!/bin/bash
+# helper falso (o real e compilado no Mac a partir de helper/kcs-iokit-trigger.c)
+exec "$@"

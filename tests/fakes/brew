@@ -1,0 +1,10 @@
+#!/bin/bash
+# brew falso: "brew install libmtp" liga os mtp-* falsos de $FAKE_TOOLS_DIR em $FAKE_BREW_PREFIX.
+echo "brew $*" >>"$FAKE_DIR/calls"
+if [ "$1" = install ] && [ "$2" = libmtp ]; then
+  mkdir -p "$FAKE_BREW_PREFIX"
+  for t in mtp-files mtp-folders mtp-getfile mtp-detect mtp-common.sh; do
+    ln -sf "$FAKE_TOOLS_DIR/$t" "$FAKE_BREW_PREFIX/$t"
+  done
+  echo "==> Pouring libmtp--1.1.22.arm64_sequoia.bottle.tar.gz"
+fi

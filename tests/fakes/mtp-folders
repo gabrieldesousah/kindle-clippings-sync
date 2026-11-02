@@ -1,0 +1,13 @@
+#!/bin/bash
+# shellcheck source=tests/fakes/mtp-common.sh
+. "$(dirname "$0")/mtp-common.sh"
+fake_prelude mtp-folders
+echo "Attempting to connect device(s)"
+if [ -e "$FAKE_DIR/nodevice" ]; then echo "mtp-folders: no devices found"; exit 0; fi
+fake_unknown_warning
+echo "mtp-folders: Successfully connected"
+if fake_busy; then echo "OK."; exit 0; fi
+echo "Friendly name: Kindle Paperwhite"
+echo "Storage: Internal Storage"
+cat "$FAKE_DIR/folders"
+echo "OK."
