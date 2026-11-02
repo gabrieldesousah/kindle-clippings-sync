@@ -212,10 +212,22 @@ Notificações aparecem em nome do **Editor de Scripts** (o `osascript`). Se nã
 tail -f ~/Library/Logs/kindle-clippings-sync.log
 launchctl print gui/$(id -u)/digital.gabriel.kindle-clippings-sync | head -n 40
 ioreg -p IOUSB -l -w0 | grep -E '"(USB Product Name|idVendor|idProduct|sessionID)"'
-mtp-detect | head -n 20       # o libmtp enxerga o Kindle?
-mtp-folders                   # deve listar a pasta documents
+~/.local/libexec/kindle-clippings-sync/kcs-mtp-pull --list > /tmp/kindle-arvore.tsv   # arvore inteira, 1 sessao
 log show --last 10m --predicate 'subsystem == "com.apple.TCC"' | grep -i -E 'bash|kcs'
 ```
+
+Não use `mtp-detect`, `mtp-folders`, `mtp-files` nem `mtp-getfile` com o Paperwhite: cada um abre uma sessão e, ao fechar, o libmtp reseta o USB e o Kindle some até ser reconectado (veja acima). Para inspecionar o aparelho use o próprio `kcs-mtp-pull`, que faz tudo numa sessão, sem o reset, e só lê:
+
+```bash
+P=~/.local/libexec/kindle-clippings-sync/kcs-mtp-pull
+$P --list                                    # T id pai storage bytes mtime(epoch) caminho, separados por TAB
+$P --get "/system/version.txt" /tmp/v.txt    # baixa pelo caminho completo
+$P --get-dir "/documents/Downloads/Items01/<livro>.sdr" /tmp/sdr   # arquivos diretos da pasta
+$P --get-id 964 /tmp/x                       # pelo id (os ids mudam a cada conexão; prefira o caminho)
+$P --list --get A /tmp/a --get B /tmp/b      # varias operações na mesma sessão
+```
+
+Cada arquivo baixado gera uma linha `GOT <id> <bytes> <caminho> -> <destino>`; falhas geram `ERR ...` no stderr e código de saída 1 (2 = sem aparelho ou bloqueado, 64 = uso incorreto).
 
 Notas:
 
@@ -226,6 +238,7 @@ Notas:
 
 - O helper do evento de IOKit é compilado no Mac; se as Command Line Tools não estiverem instaladas, o gatilho fica só no `StartInterval` (até 2 min de atraso).
 - Se houver dois Kindles conectados ao mesmo tempo, só o primeiro é sincronizado.
+- A partir do firmware 5.19.6 (agosto de 2026) o Kindle deixou de acrescentar destaques novos ao `My Clippings.txt` em vários modelos (relatos de Colorsoft, Scribe e, aqui, do Paperwhite 5.20.1). Os destaques continuam no aparelho, em `/system/ksdk/.annotations/<conta>/ksdk_annotation_v1.db` (SQLite, só posições, sem texto). Este projeto ainda sincroniza só o `My Clippings.txt`.
 - O download via MTP lê a lista de arquivos do aparelho inteiro; com bibliotecas grandes pode levar alguns segundos.
 
 ## Testes
@@ -239,6 +252,7 @@ Os testes rodam em Linux ou macOS com um `/Volumes`, um cofre e um `HOME` falsos
 
 - `/Volumes`: ausência de Kindle, pendrive sem marcador, cópia byte a byte com BOM e CRLF, backup, execução sem mudança, nova entrada, lock, `--force`, config por arquivo, cofre inexistente;
 - MTP: uma única sessão por sincronização, disparos simultâneos abrindo uma sessão só, SIGTERM ignorado herdado (timeout continua funcionando), reserva com as ferramentas `mtp-*`, Kindle ausente no `ioreg` (nada de MTP é chamado), escolha da cópia em `documents` entre iscas em outras pastas, reexecução na mesma conexão sem abrir o MTP, reconexão, aparelho ocupado (com e sem recuperação), `No devices.` no `mtp-getfile`, comando travado (timeout), aparelho sem `My Clippings.txt`, libmtp ausente, ferramentas achadas pelo PATH, prioridade do MTP sobre `/Volumes`;
+- `kcs-mtp-pull` em C, compilado contra um libmtp falso (`tests/stub-libmtp/`): modo padrão, `--list`, `--get`, `--get-dir`, `--get-id`, várias operações numa sessão só, reset desligado, erros e códigos de saída;
 - instalador: plist com e sem helper (`LaunchEvents`, `idVendor`, `idProduct`, `StartInterval`), `--product-id any`, `--interval`, `--no-iokit`, `--install-deps`, reinstalação preservando a config, execução ponta a ponta pelo helper e desinstalação.
 
 `tests/lint.sh` roda o `shellcheck` e valida os plists gerados (`plutil`, `xmllint` ou `python3` com o DTD da Apple, o que existir).

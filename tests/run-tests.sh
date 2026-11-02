@@ -519,6 +519,57 @@ check "cofre intacto" [ -f "$IVAULT/05 Conhecimento/Leituras/_Kindle/My Clipping
 ienv bash "$REPO_DIR/uninstall.sh" --purge >/dev/null 2>&1
 check "--purge remove a config" [ ! -e "$ICFG" ]
 
+echo "17) kcs-mtp-pull (C) contra um libmtp falso (tests/stub-libmtp)"
+STUB="$REPO_DIR/tests/stub-libmtp"
+CCMD=""
+if [ "$(uname -s)" = Darwin ] && xcrun --find clang >/dev/null 2>&1; then CCMD="xcrun clang"
+elif command -v cc >/dev/null 2>&1; then CCMD="cc"; fi
+if [ -z "$CCMD" ]; then
+  echo "  (pulado: sem compilador C)"
+else
+  KMP="$TMP/kmp"; KD="$TMP/kmp-out"; KLOG="$TMP/kmp-log"; mkdir -p "$KD"
+  # shellcheck disable=SC2086 # CCMD pode ser "xcrun clang"
+  $CCMD -O2 -Wall -Werror -I"$STUB" -o "$KMP" "$REPO_DIR/helper/kcs-mtp-pull.c" "$STUB/libmtp-stub.c" >"$TMP/kmp-build.log" 2>&1
+  check "compila sem avisos contra o stub" [ -x "$KMP" ]
+  BOOK="/documents/Downloads/Items01/Livro Comço_ID1"
+  kmp() { STUB_LOG="$KLOG" "$KMP" "$@"; }
+
+  : >"$KLOG"; kmp "$KD/clip.txt" >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
+  check "modo padrao: baixa /documents/My Clippings.txt" bash -c '[ "$1" -eq 0 ] && grep -q "^OK 10 40 /documents/My Clippings.txt$" "$2" && [ "$(wc -c <"$3" | tr -d " ")" -eq 40 ]' _ "$rc" "$TMP/kmp.out" "$KD/clip.txt"
+  check "modo padrao: reset desligado ao abrir (0x08008106)" grep -q '^open 0x08008106$' "$KLOG"
+
+  : >"$KLOG"; kmp --list >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
+  check "--list sai com 0 e lista os 14 itens" bash -c '[ "$1" -eq 0 ] && [ "$(wc -l <"$2" | tr -d " ")" -eq 14 ]' _ "$rc" "$TMP/kmp.out"
+  check "--list: tipo, id, pai, storage, bytes, mtime, caminho completo" \
+    grep -qx "$(printf 'f\t24\t23\t65537\t21\t1790000024\t%s.sdr/Livro_ID1abc.yjr' "$BOOK")" "$TMP/kmp.out"
+  check "--list: pastas com d e pai 0 na raiz" grep -qx "$(printf 'd\t2\t0\t65537\t0\t1790000002\t/system')" "$TMP/kmp.out"
+  check "--list: nada baixado" bash -c '! grep -q "^get" "$1"' _ "$KLOG"
+
+  : >"$KLOG"; rm -rf "$KD"; mkdir -p "$KD/sdr"
+  kmp --get "$BOOK.kfx" "$KD/book.kfx" --get-dir "$BOOK.sdr" "$KD/sdr" --get-id 30 "$KD/v.txt" >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
+  check "--get/--get-dir/--get-id numa so chamada saem com 0" [ "$rc" -eq 0 ]
+  check "uma unica sessao (1 open, 1 release)" bash -c '[ "$(grep -c "^open" "$1")" -eq 1 ] && [ "$(grep -c "^release" "$1")" -eq 1 ]' _ "$KLOG"
+  check "--get pelo caminho (com acento) baixa o arquivo certo" bash -c 'head -c 8 "$1" | grep -q "item 22" && [ "$(wc -c <"$1" | tr -d " ")" -eq 100 ]' _ "$KD/book.kfx"
+  check "--get-dir baixa so os arquivos diretos da pasta" bash -c '[ -f "$1/Livro_ID1abc.yjr" ] && [ -f "$1/Livro_ID1abc.yjf" ] && [ ! -e "$1/inner.bin" ] && [ "$(ls "$1" | wc -l | tr -d " ")" -eq 2 ]' _ "$KD/sdr"
+  check "--get-id baixa pelo id" bash -c 'head -c 7 "$1" | grep -q "item 30"' _ "$KD/v.txt"
+  check "imprime GOT por arquivo" [ "$(grep -c '^GOT ' "$TMP/kmp.out")" -eq 4 ]
+
+  kmp --get /nao/existe "$KD/x" >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
+  check "--get de caminho inexistente: sai com 1 e ERR" bash -c '[ "$1" -eq 1 ] && grep -q "^ERR nao encontrado: /nao/existe" "$2"' _ "$rc" "$TMP/kmp.err"
+  kmp --get /documents "$KD/x" >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
+  check "--get de pasta: sai com 1 sem criar arquivo" bash -c '[ "$1" -eq 1 ] && [ ! -e "$2" ]' _ "$rc" "$KD/x"
+  STUB_MODE=failget kmp --get-id 30 "$KD/y" >/dev/null 2>"$TMP/kmp.err"; rc=$?
+  check "falha de download: sai com 1 e ERR download" bash -c '[ "$1" -eq 1 ] && grep -q "^ERR download 30" "$2"' _ "$rc" "$TMP/kmp.err"
+  STUB_MODE=nodevice kmp --list >/dev/null 2>&1; rc=$?
+  check "sem aparelho: sai com 2" [ "$rc" -eq 2 ]
+  STUB_MODE=nostorage kmp --list >/dev/null 2>&1; rc=$?
+  check "sem storage (bloqueado): sai com 2" [ "$rc" -eq 2 ]
+  kmp --get "$KD/x" >/dev/null 2>&1; rc=$?
+  check "--get sem 2 argumentos: uso (64)" [ "$rc" -eq 64 ]
+  kmp >/dev/null 2>&1; rc=$?
+  check "sem argumentos: uso (64)" [ "$rc" -eq 64 ]
+fi
+
 echo
 echo "Resultado: $PASS ok, $FAIL falhas"
 [ "$FAIL" -eq 0 ]

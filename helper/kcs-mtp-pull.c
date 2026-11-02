@@ -11,6 +11,17 @@
  * antes de abrir, listamos so a raiz e a pasta documents, baixamos e liberamos.
  *
  * Uso: kcs-mtp-pull [--allow-reset] [--no-release-interface] <arquivo-destino>
+ *      kcs-mtp-pull [opcoes] --list [--get CAMINHO DEST]... [--get-id ID DEST]...
+ *                   [--get-dir CAMINHO DIR-DEST]...
+ *   Modo inventario (somente leitura, tudo numa sessao):
+ *   --list                  imprime a arvore inteira, uma linha por item, TAB:
+ *                           T <id> <pai> <storage> <bytes> <mtime-epoch> <caminho>
+ *                           (T = d pasta, f arquivo)
+ *   --get CAMINHO DEST      baixa o arquivo de caminho absoluto no aparelho
+ *   --get-id ID DEST        baixa pelo item id (ids mudam entre sessoes!)
+ *   --get-dir CAMINHO DIR   baixa todos os arquivos diretamente dentro da pasta
+ *   Cada download imprime: GOT <id> <bytes> <caminho> -> <dest>
+ *   Falhas imprimem ERR ... em stderr e o codigo de saida vira 1.
  *   --allow-reset           mantem o reset ao fechar (comportamento padrao do libmtp)
  *   --no-release-interface  nao libera a interface USB ao fechar
  *                           (DEVICE_FLAG_NO_RELEASE_INTERFACE), para aparelhos
@@ -88,6 +99,133 @@ static void search(LIBMTP_mtpdevice_t *dev, uint32_t storage, uint32_t parent,
     }
 }
 
+/* ---------- modo inventario ---------- */
+typedef struct {
+    uint32_t id, parent, storage;
+    uint64_t size;
+    long mtime;
+    int folder;
+    char *path;
+} node_t;
+
+static node_t *nodes = NULL;
+static size_t nnodes = 0, capnodes = 0;
+
+static void walk(LIBMTP_mtpdevice_t *dev, uint32_t storage, uint32_t parent,
+                 const char *path, int depth) {
+    LIBMTP_file_t *files, *f, *next;
+    if (depth > 16) {
+        return;
+    }
+    files = LIBMTP_Get_Files_And_Folders(dev, storage, parent);
+    for (f = files; f != NULL; f = next) {
+        next = f->next;
+        if (f->filename != NULL) {
+            size_t len = strlen(path) + strlen(f->filename) + 2;
+            node_t *n;
+            if (nnodes == capnodes) {
+                capnodes = capnodes ? capnodes * 2 : 256;
+                nodes = realloc(nodes, capnodes * sizeof(node_t));
+                if (nodes == NULL) {
+                    exit(1);
+                }
+            }
+            n = &nodes[nnodes++];
+            n->id = f->item_id;
+            n->parent = f->parent_id;
+            n->storage = f->storage_id;
+            n->size = f->filesize;
+            n->mtime = (long)f->modificationdate;
+            n->folder = is_folder(f);
+            n->path = malloc(len);
+            if (n->path == NULL) {
+                exit(1);
+            }
+            snprintf(n->path, len, "%s/%s", path, f->filename);
+            if (n->folder) {
+                char *sub = strdup(n->path); /* nodes pode ser realocado */
+                uint32_t id = f->item_id;
+                walk(dev, storage, id, sub, depth + 1);
+                free(sub);
+            }
+        }
+        LIBMTP_destroy_file_t(f);
+    }
+}
+
+static int fetch(LIBMTP_mtpdevice_t *dev, const node_t *n, const char *dest) {
+    struct stat sb;
+    if (n->folder) {
+        fprintf(stderr, "ERR pasta, nao arquivo: %s\n", n->path);
+        return 1;
+    }
+    if (LIBMTP_Get_File_To_File(dev, n->id, dest, NULL, NULL) != 0) {
+        fprintf(stderr, "ERR download %u %s\n", n->id, n->path);
+        LIBMTP_Dump_Errorstack(dev);
+        LIBMTP_Clear_Errorstack(dev);
+        return 1;
+    }
+    if (stat(dest, &sb) != 0 || (uint64_t)sb.st_size != n->size) {
+        fprintf(stderr, "ERR tamanho %s (esperado %llu)\n", n->path, (unsigned long long)n->size);
+        return 1;
+    }
+    printf("GOT %u %llu %s -> %s\n", n->id, (unsigned long long)n->size, n->path, dest);
+    return 0;
+}
+
+static int inventory(LIBMTP_mtpdevice_t *dev, int argc, char **argv, int list) {
+    LIBMTP_devicestorage_t *st;
+    size_t k;
+    int i, rc = 0;
+    for (st = dev->storage; st != NULL; st = st->next) {
+        walk(dev, st->id, LIBMTP_FILES_AND_FOLDERS_ROOT, "", 1);
+    }
+    if (list) {
+        for (k = 0; k < nnodes; k++) {
+            printf("%c\t%u\t%u\t%u\t%llu\t%ld\t%s\n", nodes[k].folder ? 'd' : 'f',
+                   nodes[k].id, nodes[k].parent, nodes[k].storage,
+                   (unsigned long long)nodes[k].size, nodes[k].mtime, nodes[k].path);
+        }
+        fflush(stdout);
+    }
+    for (i = 1; i < argc; i++) {
+        const char *a = argv[i];
+        if (strcmp(a, "--get") == 0 || strcmp(a, "--get-id") == 0 ||
+            strcmp(a, "--get-dir") == 0) {
+            const char *key = argv[i + 1], *dest = argv[i + 2];
+            int found = 0;
+            i += 2;
+            for (k = 0; k < nnodes; k++) {
+                node_t *n = &nodes[k];
+                if (strcmp(a, "--get") == 0 && strcmp(n->path, key) == 0) {
+                    rc |= fetch(dev, n, dest);
+                    found = 1;
+                    break;
+                } else if (strcmp(a, "--get-id") == 0 && n->id == (uint32_t)strtoul(key, NULL, 10)) {
+                    rc |= fetch(dev, n, dest);
+                    found = 1;
+                    break;
+                } else if (strcmp(a, "--get-dir") == 0 && !n->folder) {
+                    size_t kl = strlen(key);
+                    const char *base = strrchr(n->path, '/');
+                    if (strncmp(n->path, key, kl) == 0 && n->path[kl] == '/' &&
+                        base == n->path + kl) {
+                        char out[1024];
+                        snprintf(out, sizeof(out), "%s/%s", dest, base + 1);
+                        rc |= fetch(dev, n, out);
+                        found = 1;
+                    }
+                }
+            }
+            if (!found) {
+                fprintf(stderr, "ERR nao encontrado: %s\n", key);
+                rc = 1;
+            }
+        }
+    }
+    return rc;
+}
+
 int main(int argc, char **argv) {
     LIBMTP_raw_device_t *raw = NULL;
     LIBMTP_mtpdevice_t *dev;
@@ -96,6 +234,7 @@ int main(int argc, char **argv) {
     candidate_t best;
     const char *dest = NULL;
     int allow_reset = 0, no_release = 0, nraw = 0, pick = 0, i, rc = 3;
+    int inv_mode = 0, list = 0;
     struct stat sb;
 
     for (i = 1; i < argc; i++) {
@@ -103,6 +242,16 @@ int main(int argc, char **argv) {
             allow_reset = 1;
         } else if (strcmp(argv[i], "--no-release-interface") == 0) {
             no_release = 1;
+        } else if (strcmp(argv[i], "--list") == 0) {
+            inv_mode = list = 1;
+        } else if (strcmp(argv[i], "--get") == 0 || strcmp(argv[i], "--get-id") == 0 ||
+                   strcmp(argv[i], "--get-dir") == 0) {
+            if (i + 2 >= argc) {
+                fprintf(stderr, "uso: %s exige 2 argumentos\n", argv[i]);
+                return 64;
+            }
+            inv_mode = 1;
+            i += 2;
         } else if (dest == NULL) {
             dest = argv[i];
         } else {
@@ -110,7 +259,7 @@ int main(int argc, char **argv) {
             break;
         }
     }
-    if (dest == NULL) {
+    if (dest == NULL && !inv_mode) {
         fprintf(stderr, "uso: kcs-mtp-pull [--allow-reset] [--no-release-interface] <arquivo-destino>\n");
         return 64;
     }
@@ -159,6 +308,13 @@ int main(int argc, char **argv) {
         LIBMTP_Release_Device(dev);
         free(raw);
         return 2;
+    }
+
+    if (inv_mode) {
+        rc = inventory(dev, argc, argv, list);
+        LIBMTP_Release_Device(dev);
+        free(raw);
+        return rc;
     }
 
     /* 1) Caminho rapido: /documents na raiz de cada armazenamento. */
