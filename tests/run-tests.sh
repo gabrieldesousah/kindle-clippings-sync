@@ -196,7 +196,7 @@ mkdir -p "$MDEV" "$TMP/no-volumes"
 mrun() {
   env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
     KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_PULL="${MP:-}" KCS_MTP_DELAY=0 KCS_MTP_RETRIES="${MR:-3}" KCS_MTP_RETRY_INTERVAL=0 \
-    KCS_MTP_TIMEOUT="${MT:-20}" bash "$SCRIPT" "$@" </dev/null >"$TMP/stdout" 2>"$TMP/stderr"
+    KCS_MTP_TIMEOUT="${MT:-20}" KCS_MTP_POSTCHECK_DELAY=0 bash "$SCRIPT" "$@" </dev/null >"$TMP/stdout" 2>"$TMP/stderr"
 }
 mcalls() { grep -c -E '^(mtp-|kcs-mtp-pull)' "$FAKE_DIR/calls" 2>/dev/null || true; }
 npulls() { grep -c '^kcs-mtp-pull' "$FAKE_DIR/calls" 2>/dev/null || true; }
@@ -250,6 +250,8 @@ check "nota conta 2 entradas" grep -q '^entradas: 2$' "$MDEST/Kindle Sync.md"
 check "nota indica origem MTP" grep -q 'origem: "MTP (Kindle Paperwhite): documents/My Clippings.txt"' "$MDEST/Kindle Sync.md"
 check "notificacao com 2 destaques" bash -c 'tail -n1 "$1" | grep -q "Kindle sincronizado: 2 destaques"' _ "$NOTIFY_LOG"
 check "log menciona deteccao MTP" grep -q 'Kindle Paperwhite detectado via USB/MTP' "$LOG"
+check "log mostra os flags sem o reset (0x10000000)" grep -q 'baixado via MTP numa sessão: .*\[0x08008106\]' "$LOG"
+check "log confirma que o Kindle continua no USB" grep -q 'Kindle Paperwhite continua no USB depois da sessão MTP' "$LOG"
 check "temporarios removidos" bash -c '[ -z "$(ls -d "${TMPDIR:-/tmp}"/kcs-mtp.* 2>/dev/null)" ]'
 check "lock liberado" [ ! -e "$MSTATE/lock" ]
 
@@ -390,6 +392,13 @@ t1="$(date +%s)"
 rm -f "$FAKE_DIR/hang"
 check "comando travado que ignora TERM e encerrado com KILL" [ $((t1 - t0)) -lt 15 ]
 check "lock liberado" [ ! -e "$MSTATE/lock" ]
+
+echo "M14d) KCS_MTP_PULL_ARGS=--no-release-interface"
+entry "Livro MTP" "Destaque J." >>"$MDEV/clippings-real.txt"
+echo 1818 >"$FAKE_DIR/session"; : >"$FAKE_DIR/calls"
+KCS_MTP_PULL_ARGS=--no-release-interface mrun; rc=$?
+check "repassa a opcao ao kcs-mtp-pull" bash -c '[ "$1" -eq 0 ] && grep -q "^kcs-mtp-pull --no-release-interface " "$2"' _ "$rc" "$FAKE_DIR/calls"
+check "log mostra o flag NO_RELEASE_INTERFACE" grep -q '\[0x08008146\]' "$LOG"
 
 echo "M14) Kindle MTP tem prioridade sobre um volume montado"
 : >"$FAKE_DIR/calls"

@@ -10,8 +10,11 @@
  * encontra o aparelho. Aqui abrimos o aparelho uma vez, desligamos esse flag
  * antes de abrir, listamos so a raiz e a pasta documents, baixamos e liberamos.
  *
- * Uso: kcs-mtp-pull [--allow-reset] <arquivo-destino>
- *   --allow-reset  mantem o reset ao fechar (comportamento padrao do libmtp)
+ * Uso: kcs-mtp-pull [--allow-reset] [--no-release-interface] <arquivo-destino>
+ *   --allow-reset           mantem o reset ao fechar (comportamento padrao do libmtp)
+ *   --no-release-interface  nao libera a interface USB ao fechar
+ *                           (DEVICE_FLAG_NO_RELEASE_INTERFACE), para aparelhos
+ *                           que caem do USB mesmo sem o reset
  *
  * Saida (stdout), em sucesso:  OK <item-id> <bytes> <caminho no aparelho>
  * Codigos de saida:
@@ -33,6 +36,7 @@
 
 #define KCS_AMAZON_VID 0x1949
 #define KCS_FLAG_FORCE_RESET_ON_CLOSE 0x10000000u /* src/device-flags.h */
+#define KCS_FLAG_NO_RELEASE_INTERFACE 0x00000040u /* src/device-flags.h */
 #define KCS_CLIPPINGS "My Clippings.txt"
 #define KCS_MAX_DEPTH 4
 
@@ -91,12 +95,14 @@ int main(int argc, char **argv) {
     LIBMTP_error_number_t err;
     candidate_t best;
     const char *dest = NULL;
-    int allow_reset = 0, nraw = 0, pick = 0, i, rc = 3;
+    int allow_reset = 0, no_release = 0, nraw = 0, pick = 0, i, rc = 3;
     struct stat sb;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--allow-reset") == 0) {
             allow_reset = 1;
+        } else if (strcmp(argv[i], "--no-release-interface") == 0) {
+            no_release = 1;
         } else if (dest == NULL) {
             dest = argv[i];
         } else {
@@ -105,7 +111,7 @@ int main(int argc, char **argv) {
         }
     }
     if (dest == NULL) {
-        fprintf(stderr, "uso: kcs-mtp-pull [--allow-reset] <arquivo-destino>\n");
+        fprintf(stderr, "uso: kcs-mtp-pull [--allow-reset] [--no-release-interface] <arquivo-destino>\n");
         return 64;
     }
 
@@ -133,6 +139,10 @@ int main(int argc, char **argv) {
     if (!allow_reset) {
         raw[pick].device_entry.device_flags &= ~KCS_FLAG_FORCE_RESET_ON_CLOSE;
     }
+    if (no_release) {
+        raw[pick].device_entry.device_flags |= KCS_FLAG_NO_RELEASE_INTERFACE;
+    }
+    fprintf(stderr, "kcs-mtp-pull: flags usados 0x%08x\n", raw[pick].device_entry.device_flags);
 
     dev = LIBMTP_Open_Raw_Device_Uncached(&raw[pick]);
     if (dev == NULL) {

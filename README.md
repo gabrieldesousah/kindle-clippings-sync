@@ -57,6 +57,8 @@ O `helper/kcs-mtp-pull.c` resolve isso:
 - só se não houver `/documents` na raiz faz uma busca limitada no aparelho;
 - códigos de saída: `0` ok, `2` sem aparelho/ocupado, `3` arquivo inexistente, `1` outro erro.
 
+Sintoma visto pelo usuário: o Kindle continua na tela do livro, sem mensagem, e segue carregando (LED âmbar), mas some do `ioreg` e do `system_profiler`. Ou seja, a alimentação continua e só o lado de dados USB cai, como acontece depois de um reset que o aparelho não atende. Depois de cada download o script confere o `ioreg` e registra no log "continua no USB depois da sessão MTP" ou "saiu do USB depois da sessão MTP". Se ainda cair mesmo sem o reset, teste `KCS_MTP_PULL_ARGS=--no-release-interface` na config (não libera a interface USB ao fechar). Para o Kindle reaparecer depois de cair é preciso desconectar e conectar o cabo.
+
 O `install.sh` compila com `xcrun clang` e `pkg-config --cflags --libs libmtp` e instala em `~/.local/libexec/kindle-clippings-sync/kcs-mtp-pull`. Se ele não existir, o script volta para as ferramentas `mtp-*` (e avisa no log que isso pode derrubar o Kindle). Depois de um `brew upgrade libmtp`, rode `./install.sh` de novo para recompilar.
 
 Outro detalhe encontrado no Mac: o processo iniciado pelo helper de IOKit herdava o `SIGTERM` ignorado do libdispatch, então o timeout do script não conseguia encerrar o processo vigia e cada comando esperava o tempo limite inteiro. O helper agora restaura os sinais antes do `execv`, e o timeout do script usa `STOP`/`KILL` em vez de depender do `SIGTERM`.
@@ -143,6 +145,7 @@ O arquivo `~/.config/kindle-clippings-sync/config.env` é um shell simples e pod
 | `KCS_START_INTERVAL` | `120` | `StartInterval` de reserva |
 | `KCS_IOKIT_TRIGGER` | `1` | `0` desliga o gatilho de conexão USB |
 | `KCS_MTP_PULL` | (vazio) | caminho do `kcs-mtp-pull`; vazio = `~/.local/libexec/kindle-clippings-sync/kcs-mtp-pull`; `none` = usar as ferramentas `mtp-*` |
+| `KCS_MTP_PULL_ARGS` | (vazio) | opções extras do `kcs-mtp-pull`, ex.: `--no-release-interface` |
 | `KCS_MTP_BIN_DIR` | (vazio) | pasta dos `mtp-*`; vazio = PATH, `/opt/homebrew/bin`, `/usr/local/bin` |
 | `KCS_MTP_DELAY` | `3` | segundos de espera depois de detectar o Kindle |
 | `KCS_MTP_RETRIES` | `4` | tentativas quando o MTP está ocupado |

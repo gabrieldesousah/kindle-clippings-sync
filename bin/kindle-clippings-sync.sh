@@ -27,6 +27,7 @@
 #   KCS_USB_VENDOR_ID       idVendor do Kindle em decimal (padrao: 6473 = 0x1949, Amazon)
 #   KCS_MTP_PULL            programa de download numa sessao so (padrao: ~/.local/libexec/
 #                           kindle-clippings-sync/kcs-mtp-pull; "none" usa as ferramentas mtp-*)
+#   KCS_MTP_PULL_ARGS       opcoes extras do kcs-mtp-pull (ex.: --no-release-interface)
 #   KCS_MTP_BIN_DIR         pasta das ferramentas mtp-* (padrao: PATH, /opt/homebrew/bin, /usr/local/bin)
 #   KCS_MTP_DELAY           segundos de espera apos detectar o aparelho (padrao: 3)
 #   KCS_MTP_RETRIES         tentativas se o MTP estiver ocupado (padrao: 4)
@@ -51,7 +52,7 @@ CLIPPINGS_NAME="My Clippings.txt"
 CLIPPINGS_REL="documents/$CLIPPINGS_NAME"
 
 CONFIG_VARS="KCS_VAULT KCS_DEST_SUBDIR KCS_DEST KCS_SOURCE KCS_LOG KCS_STATE_DIR KCS_NOTIFY \
-KCS_MAX_BACKUPS KCS_USB_VENDOR_ID KCS_MTP_PULL KCS_MTP_BIN_DIR KCS_MTP_DELAY KCS_MTP_RETRIES \
+KCS_MAX_BACKUPS KCS_USB_VENDOR_ID KCS_MTP_PULL KCS_MTP_PULL_ARGS KCS_MTP_BIN_DIR KCS_MTP_DELAY KCS_MTP_RETRIES \
 KCS_MTP_RETRY_INTERVAL KCS_MTP_TIMEOUT KCS_MTP_RESYNC_SECONDS KCS_MTP_KILL_PTPCAMERAD \
 KCS_VOLUMES_ROOT KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_MOUNT_WINDOW KCS_REQUIRE_MARKER"
 
@@ -62,7 +63,7 @@ for arg in "$@"; do
     --now|--run-now) NOW=1 ;;
     --force) FORCE=1; NOW=1 ;;
     --version) echo "kindle-clippings-sync $VERSION"; exit 0 ;;
-    -h|--help) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opcao desconhecida: $arg" >&2; exit 2 ;;
   esac
 done
@@ -95,6 +96,7 @@ KCS_NOTIFY="${KCS_NOTIFY:-1}"
 KCS_MAX_BACKUPS="${KCS_MAX_BACKUPS:-0}"
 KCS_USB_VENDOR_ID="${KCS_USB_VENDOR_ID:-6473}"
 KCS_MTP_PULL="${KCS_MTP_PULL:-}"
+KCS_MTP_PULL_ARGS="${KCS_MTP_PULL_ARGS:-}"
 KCS_MTP_BIN_DIR="${KCS_MTP_BIN_DIR:-}"
 KCS_MTP_DELAY="${KCS_MTP_DELAY:-3}"
 KCS_MTP_RETRIES="${KCS_MTP_RETRIES:-4}"
@@ -455,7 +457,8 @@ mtp_pull() {
 mtp_pull_single() {
   local out="$1" txt="$WORK/mtp-pull.txt" rc
   rm -f "$out"
-  run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_PULL" "$out" >"$txt" 2>&1 </dev/null
+  # shellcheck disable=SC2086 # KCS_MTP_PULL_ARGS pode ter varias opcoes
+  run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_PULL" $KCS_MTP_PULL_ARGS "$out" >"$txt" 2>&1 </dev/null
   rc=$?
   if [ "$rc" -gt 128 ]; then log "kcs-mtp-pull excedeu ${KCS_MTP_TIMEOUT}s"; return 2; fi
   case "$rc" in
@@ -464,7 +467,7 @@ mtp_pull_single() {
         log "kcs-mtp-pull terminou sem gerar o arquivo: $(tr '\n' ' ' <"$txt" | cut -c1-300)"
         return 1
       fi
-      log "baixado via MTP numa sessão: $(grep '^OK ' "$txt" | sed 's/^OK \([0-9]*\) \([0-9]*\) /item \1, \2 bytes, /')"
+      log "baixado via MTP numa sessão: $(grep '^OK ' "$txt" | sed 's/^OK \([0-9]*\) \([0-9]*\) /item \1, \2 bytes, /') [$(grep 'flags usados' "$txt" | sed 's/.*flags usados //')]"
       return 0
       ;;
     2|3) return "$rc" ;;
@@ -646,6 +649,16 @@ run_mtp() {
       printf '%s\n' "$key" >"$KCS_STATE_DIR/mtp-notified"
     fi
     return 1
+  fi
+
+  # Diagnostico: o Kindle continua no USB depois de fechar a sessao?
+  if [ -n "$MTP_PULL" ]; then
+    sleep "${KCS_MTP_POSTCHECK_DELAY:-2}"
+    if usb_kindles | grep -q .; then
+      log "$name continua no USB depois da sessão MTP"
+    else
+      log "aviso: $name saiu do USB depois da sessão MTP (tente KCS_MTP_PULL_ARGS=--no-release-interface)"
+    fi
   fi
 
   sync_file "$tmpfile" "MTP ($name): $CLIPPINGS_REL"
