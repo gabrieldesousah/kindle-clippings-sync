@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>__LABEL__</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>__SCRIPT__</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>KCS_CONFIG</key>
+		<string>__CONFIG__</string>
+		<key>PATH</key>
+		<string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+
+	<!-- Dispara a cada montagem de volume (o script ignora o que nao for Kindle). -->
+	<key>StartOnMount</key>
+	<true/>
+
+	<key>RunAtLoad</key>
+	<false/>
+
+	<!-- O proprio script espera KCS_MOUNT_DELAY segundos e tenta KCS_RETRIES vezes. -->
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<key>StandardOutPath</key>
+	<string>__LOG__</string>
+	<key>StandardErrorPath</key>
+	<string>__LOG__</string>
+</dict>
+</plist>
