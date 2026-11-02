@@ -363,7 +363,8 @@ mkdir -p "$IHOME"
 IVAULT="$IHOME/Library/Mobile Documents/iCloud~md~obsidian/Documents"
 IPATH="$TMP/ibin:/usr/bin:/bin" # PATH sem mtp-* e sem brew
 mkdir -p "$TMP/ibin"
-ienv() { env -u KCS_VAULT -u KCS_DEST_SUBDIR -u KCS_CONFIG HOME="$IHOME" PATH="$IPATH" KCS_SKIP_LAUNCHCTL=1 "$@"; }
+# KCS_TOOL_DIRS vazio: nao procura em /opt/homebrew/bin nem /usr/local/bin (o Mac real pode ter libmtp).
+ienv() { env -u KCS_VAULT -u KCS_DEST_SUBDIR -u KCS_CONFIG HOME="$IHOME" PATH="$IPATH" KCS_TOOL_DIRS="" KCS_SKIP_LAUNCHCTL=1 "$@"; }
 IPLIST="$IHOME/Library/LaunchAgents/digital.gabriel.kindle-clippings-sync.plist"
 ICFG="$IHOME/.config/kindle-clippings-sync/config.env"
 plist_ok() {

@@ -133,7 +133,8 @@ sed_escape() { printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'; }
 find_tool() {
   local d
   if command -v "$1" >/dev/null 2>&1; then command -v "$1"; return 0; fi
-  for d in /opt/homebrew/bin /usr/local/bin; do
+  # KCS_TOOL_DIRS existe para os testes isolarem o Homebrew real.
+  for d in ${KCS_TOOL_DIRS-/opt/homebrew/bin /usr/local/bin}; do
     [ -x "$d/$1" ] && { echo "$d/$1"; return 0; }
   done
   return 1
