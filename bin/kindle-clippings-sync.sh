@@ -198,7 +198,7 @@ backups: $backups
 Nota gerada automaticamente pelo kindle-clippings-sync. Ela é reescrita a cada sincronização, então não vale a pena editá-la à mão.
 
 - Última sincronização: $human_date às $human_time
-- Total: $entries $label (contadas pelos separadores \`==========\`)
+- Total: $entries $label (contagem pelos separadores \`==========\`)
 - Arquivo copiado: [[My Clippings.txt]]
 - Origem no Kindle: \`$src\`
 - Backups guardados em \`backups/\`: $backups
