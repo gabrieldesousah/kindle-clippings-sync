@@ -181,9 +181,12 @@ if [ "$KCS_IOKIT_TRIGGER" = 1 ]; then
     cp "$HELPER_BIN" "$HELPER.tmp.$$" && chmod 755 "$HELPER.tmp.$$" && mv -f "$HELPER.tmp.$$" "$HELPER"
     USE_HELPER=1
   elif [ "${KCS_HELPER_BUILD:-1}" = 1 ] && [ "$(uname -s)" = Darwin ] && xcode-select -p >/dev/null 2>&1 &&
-    CC="$(xcrun --find clang 2>/dev/null || command -v /usr/bin/cc)" && [ -x "$CC" ]; then
-    echo "==> Compilando $HELPER ($CC)"
-    if "$CC" -O2 -Wall -o "$HELPER.tmp.$$" "$HELPER_SRC" 2>/tmp/kcs-helper-build.log; then
+    xcrun --find clang >/dev/null 2>&1; then
+    # "xcrun clang" define o SDK (sysroot); o clang das Command Line Tools chamado
+    # pelo caminho absoluto nao acha <dispatch/dispatch.h>. Tambem evita um "cc"
+    # do shell do usuario que seja outra coisa.
+    echo "==> Compilando $HELPER (xcrun clang)"
+    if xcrun clang -O2 -Wall -o "$HELPER.tmp.$$" "$HELPER_SRC" 2>/tmp/kcs-helper-build.log; then
       mv -f "$HELPER.tmp.$$" "$HELPER"
       USE_HELPER=1
     else
