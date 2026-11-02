@@ -1,0 +1,28 @@
+#!/bin/bash
+# kcs-mtp-pull falso: mesma interface e codigos de saida do helper/kcs-mtp-pull.c.
+# Usa o mesmo estado dos mtp-* falsos ($FAKE_DIR/manifest, folders, busy, ...).
+# FAKE_PULL_DELAY: segundos de espera antes de responder (testes de concorrencia).
+# shellcheck source=tests/fakes/mtp-common.sh
+. "$(dirname "$0")/mtp-common.sh"
+fake_prelude "kcs-mtp-pull $*"
+[ -n "${FAKE_PULL_DELAY:-}" ] && sleep "$FAKE_PULL_DELAY"
+dest=""
+for a in "$@"; do case "$a" in --allow-reset) ;; *) dest="$a" ;; esac; done
+[ -n "$dest" ] || { echo "uso: kcs-mtp-pull [--allow-reset] <arquivo-destino>" >&2; exit 64; }
+if [ -e "$FAKE_DIR/nodevice" ]; then echo "kcs-mtp-pull: No raw devices found." >&2; exit 2; fi
+echo "kcs-mtp-pull: device 1949:9981 flags 0x18008106" >&2
+if fake_busy; then exit 2; fi
+# /documents na raiz (nivel 0 em $FAKE_DIR/folders).
+docs="$(awk -F'\t' '/^[0-9]+\t[^ ]/ && tolower($2) == "documents" { print $1; exit }' "$FAKE_DIR/folders")"
+line="$(awk -F'\t' -v d="$docs" 'tolower($3) == "my clippings.txt" && $2 == d { print; exit }' "$FAKE_DIR/manifest")"
+where="/documents/My Clippings.txt"
+if [ -z "$line" ]; then
+  line="$(awk -F'\t' 'tolower($3) == "my clippings.txt" { print; exit }' "$FAKE_DIR/manifest")"
+  where="/outro/My Clippings.txt"
+fi
+if [ -z "$line" ]; then echo "kcs-mtp-pull: My Clippings.txt not found" >&2; exit 3; fi
+if [ -e "$FAKE_DIR/getfile-nodev" ]; then echo "Error getting file from MTP device." >&2; exit 1; fi
+id="$(printf '%s' "$line" | cut -f1)"
+src="$(printf '%s' "$line" | cut -f4)"
+cp "$src" "$dest" || exit 1
+printf 'OK %s %s %s\n' "$id" "$(wc -c <"$src" | tr -d ' ')" "$where"

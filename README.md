@@ -13,7 +13,7 @@ Além do libmtp, usa só o que vem no macOS: `bash` 3.2, `launchd`, `ioreg`, `sh
 
 1. O `launchd` dispara o job quando o Kindle é conectado (evento de IOKit), a cada 120 s como reserva e a cada volume montado.
 2. O script consulta o `ioreg -p IOUSB` (barato, não abre o MTP). Se não há Kindle no USB, procura em `/Volumes`; se não há nada, sai em silêncio.
-3. **Kindle MTP:** se essa conexão USB (o `sessionID` do aparelho) já foi sincronizada, sai na hora. Senão, roda `mtp-files` e `mtp-folders`, encontra o item `My Clippings.txt` cuja pasta pai é `documents` (na raiz do armazenamento, de preferência) e baixa com `mtp-getfile` para um arquivo temporário, conferindo o tamanho.
+3. **Kindle MTP:** se essa conexão USB (o `sessionID` do aparelho) já foi sincronizada, sai na hora. Senão, pega o lock e roda o `kcs-mtp-pull` (programa C deste repositório, ligado ao libmtp), que abre **uma única sessão** MTP, lista só a raiz e a pasta `documents`, baixa `My Clippings.txt` para um arquivo temporário, confere o tamanho e libera o aparelho sem resetar o USB (veja abaixo).
 4. **Kindle em `/Volumes`:** só aceita volumes com cara de Kindle (nome com "kindle", pasta `system/`, `.kindle`, `system/version.txt` ou `amazon-cover-bug`).
 5. Compara o SHA-256 com o da última sincronização. Se nada mudou, não toca no cofre.
 6. Se mudou, copia os bytes exatamente como estão (UTF-8 com BOM e quebras CRLF preservados) para:
@@ -30,10 +30,10 @@ flowchart TD
     A["Kindle conectado (evento IOKit)<br/>ou StartInterval de 120 s<br/>ou volume montado"] --> B{"ioreg -p IOUSB mostra<br/>um aparelho Amazon 0x1949?"}
     B -- sim --> C{"Esta conexão USB (sessionID)<br/>já foi sincronizada?"}
     C -- sim --> Z1["Sai na hora, sem abrir o MTP"]
-    C -- não --> D["mtp-files + mtp-folders:<br/>acha My Clippings.txt em documents"]
+    C -- não --> D["kcs-mtp-pull (uma sessão MTP):<br/>acha /documents/My Clippings.txt"]
     D --> E{"MTP ocupado por outro app?"}
     E -- sim --> F["Espera e tenta de novo<br/>(KCS_MTP_RETRIES)"] --> D
-    E -- não --> G["mtp-getfile para um temporário"]
+    E -- não --> G["Baixa para um temporário<br/>e libera sem reset USB"]
     B -- não --> H{"Existe /Volumes/*/documents/My Clippings.txt<br/>em um volume com cara de Kindle?"}
     H -- não --> Z2["Sai em silêncio"]
     H -- sim --> I["Usa o arquivo do volume"]
@@ -46,13 +46,28 @@ flowchart TD
     N --> O["Notificação: Kindle sincronizado: N destaques"]
 ```
 
+## Por que um programa próprio para o MTP (`kcs-mtp-pull`)
+
+No Mac do Gabriel, o Kindle Paperwhite (1949:9981) **caía do USB** logo depois da primeira ferramenta do libmtp terminar. A causa: o libmtp 1.1.23 cadastra esse ID como "Kindle Scribe 32GB" com `DEVICE_FLAGS_ANDROID_BUGS`, que inclui `DEVICE_FLAG_FORCE_RESET_ON_CLOSE` (os flags reportados são `0x18008106`; o bit `0x10000000` é esse). Ao fechar cada sessão o libmtp chama `libusb_reset_device()`, e o Paperwhite some do barramento até ser reconectado. Como `mtp-files`, `mtp-folders` e `mtp-getfile` abrem uma sessão cada, a segunda já não encontrava o aparelho.
+
+O `helper/kcs-mtp-pull.c` resolve isso:
+
+- desliga `FORCE_RESET_ON_CLOSE` na entrada do aparelho antes de abrir (com `--allow-reset` mantém o comportamento original);
+- faz tudo numa sessão: raiz, pasta `documents`, download e `LIBMTP_Release_Device` (libera a interface e fecha, sem reset);
+- só se não houver `/documents` na raiz faz uma busca limitada no aparelho;
+- códigos de saída: `0` ok, `2` sem aparelho/ocupado, `3` arquivo inexistente, `1` outro erro.
+
+O `install.sh` compila com `xcrun clang` e `pkg-config --cflags --libs libmtp` e instala em `~/.local/libexec/kindle-clippings-sync/kcs-mtp-pull`. Se ele não existir, o script volta para as ferramentas `mtp-*` (e avisa no log que isso pode derrubar o Kindle). Depois de um `brew upgrade libmtp`, rode `./install.sh` de novo para recompilar.
+
+Outro detalhe encontrado no Mac: o processo iniciado pelo helper de IOKit herdava o `SIGTERM` ignorado do libdispatch, então o timeout do script não conseguia encerrar o processo vigia e cada comando esperava o tempo limite inteiro. O helper agora restaura os sinais antes do `execv`, e o timeout do script usa `STOP`/`KILL` em vez de depender do `SIGTERM`.
+
 ## Gatilho: como o job é disparado
 
 Um Kindle MTP não gera evento de montagem, então o `StartOnMount` não serve para ele. O LaunchAgent combina três gatilhos:
 
 1. **Conexão USB (`LaunchEvents` / `com.apple.iokit.matching`)**, casando `IOProviderClass = IOUSBHostDevice`, `idVendor = 6473` (0x1949) e `idProduct = 39297` (0x9981), com `IOMatchLaunchStream`. É o que faz a sincronização acontecer segundos depois de plugar o cabo.
    - Esse tipo de evento precisa ser "aceito" pelo processo com `xpc_set_event_stream_handler()`. Se o job sair sem isso, o `launchd` considera o evento pendente e relança o job em loop enquanto o aparelho estiver conectado. Um script bash não consegue chamar essa API, por isso existe o `helper/kcs-iokit-trigger.c`: um programa C mínimo que o `install.sh` compila (precisa das Command Line Tools: `xcode-select --install`). Ele consome o evento, espera ~1 s e faz `execv` para `/bin/bash kindle-clippings-sync` (não fica residente).
-   - Mesmo assim o evento pode disparar mais de uma vez (reconexões, o Kindle trocando de modo USB, ou o `launchd` reentregando). Isso é inofensivo: o script guarda o `sessionID` da conexão já sincronizada e sai sem abrir o MTP.
+   - Mesmo assim o evento pode disparar mais de uma vez (no Mac real chegam dois eventos por conexão, entregues ao mesmo processo). Isso é inofensivo: o `launchd` não inicia uma segunda instância enquanto a primeira roda, o script pega um lock antes de abrir o MTP e confere de novo, depois do lock, se a conexão (`sessionID`) já foi sincronizada. Disparos seguintes saem sem abrir o MTP.
    - Sem compilador, o instalador **não** coloca o `LaunchEvents` no plist (para evitar o loop) e avisa; fica valendo o item 2.
 2. **`StartInterval` de 120 s (reserva).** Custa só um `ioreg` quando não há Kindle; com o Kindle conectado e já sincronizado, também sai na hora. Ajuste com `--interval N` ou desligue com `--interval 0`.
 3. **`StartOnMount`** para Kindles antigos que montam em `/Volumes`.
@@ -97,6 +112,7 @@ Pode rodar o `install.sh` de novo quantas vezes quiser (por exemplo depois de um
 | `--interval N` | `StartInterval` de reserva em segundos (padrão `120`; `0` desliga) |
 | `--no-iokit` | não usa o gatilho de conexão USB |
 | `--helper-bin CAMINHO` | usa um helper já compilado |
+| `--pull-bin CAMINHO` | usa um `kcs-mtp-pull` já compilado |
 | `--test` | depois de instalar, roda o script no Terminal (`--now`) |
 | `--run-now` | depois de instalar, dispara via `launchctl kickstart` e mostra o log |
 | `--no-load` | só gera os arquivos, sem carregar no `launchd` |
@@ -126,6 +142,7 @@ O arquivo `~/.config/kindle-clippings-sync/config.env` é um shell simples e pod
 | `KCS_USB_PRODUCT_ID` | `39297` | `idProduct` do gatilho USB (0x9981) ou `any` |
 | `KCS_START_INTERVAL` | `120` | `StartInterval` de reserva |
 | `KCS_IOKIT_TRIGGER` | `1` | `0` desliga o gatilho de conexão USB |
+| `KCS_MTP_PULL` | (vazio) | caminho do `kcs-mtp-pull`; vazio = `~/.local/libexec/kindle-clippings-sync/kcs-mtp-pull`; `none` = usar as ferramentas `mtp-*` |
 | `KCS_MTP_BIN_DIR` | (vazio) | pasta dos `mtp-*`; vazio = PATH, `/opt/homebrew/bin`, `/usr/local/bin` |
 | `KCS_MTP_DELAY` | `3` | segundos de espera depois de detectar o Kindle |
 | `KCS_MTP_RETRIES` | `4` | tentativas quando o MTP está ocupado |
@@ -215,10 +232,10 @@ bash tests/run-tests.sh
 bash tests/lint.sh
 ```
 
-Os testes rodam em Linux ou macOS com um `/Volumes`, um cofre e um `HOME` falsos e com versões falsas de `ioreg`, `mtp-files`, `mtp-folders`, `mtp-getfile`, `mtp-detect`, `brew` e `osascript` em `tests/fakes/`. As saídas falsas seguem o formato do libmtp 1.1.22 (`examples/files.c`, `folders.c`, `getfile.c` e as mensagens de erro de `src/libusb1-glue.c`) e do `ioreg -p IOUSB -l -w0` de um Mac Apple Silicon. Cobrem, entre outros:
+Os testes rodam em Linux ou macOS com um `/Volumes`, um cofre e um `HOME` falsos e com versões falsas de `ioreg`, `kcs-mtp-pull`, `mtp-files`, `mtp-folders`, `mtp-getfile`, `mtp-detect`, `brew` e `osascript` em `tests/fakes/`. As saídas falsas seguem o formato do libmtp 1.1.22 (`examples/files.c`, `folders.c`, `getfile.c` e as mensagens de erro de `src/libusb1-glue.c`) e do `ioreg -p IOUSB -l -w0` de um Mac Apple Silicon. Cobrem, entre outros:
 
 - `/Volumes`: ausência de Kindle, pendrive sem marcador, cópia byte a byte com BOM e CRLF, backup, execução sem mudança, nova entrada, lock, `--force`, config por arquivo, cofre inexistente;
-- MTP: Kindle ausente no `ioreg` (nenhum `mtp-*` é chamado), escolha da cópia em `documents` entre iscas em outras pastas, reexecução na mesma conexão sem abrir o MTP, reconexão, aparelho ocupado (com e sem recuperação), `No devices.` no `mtp-getfile`, comando travado (timeout), aparelho sem `My Clippings.txt`, libmtp ausente, ferramentas achadas pelo PATH, prioridade do MTP sobre `/Volumes`;
+- MTP: uma única sessão por sincronização, disparos simultâneos abrindo uma sessão só, SIGTERM ignorado herdado (timeout continua funcionando), reserva com as ferramentas `mtp-*`, Kindle ausente no `ioreg` (nada de MTP é chamado), escolha da cópia em `documents` entre iscas em outras pastas, reexecução na mesma conexão sem abrir o MTP, reconexão, aparelho ocupado (com e sem recuperação), `No devices.` no `mtp-getfile`, comando travado (timeout), aparelho sem `My Clippings.txt`, libmtp ausente, ferramentas achadas pelo PATH, prioridade do MTP sobre `/Volumes`;
 - instalador: plist com e sem helper (`LaunchEvents`, `idVendor`, `idProduct`, `StartInterval`), `--product-id any`, `--interval`, `--no-iokit`, `--install-deps`, reinstalação preservando a config, execução ponta a ponta pelo helper e desinstalação.
 
 `tests/lint.sh` roda o `shellcheck` e valida os plists gerados (`plutil`, `xmllint` ou `python3` com o DTD da Apple, o que existir).

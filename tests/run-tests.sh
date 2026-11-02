@@ -195,10 +195,11 @@ MDEV="$TMP/mtp-device"
 mkdir -p "$MDEV" "$TMP/no-volumes"
 mrun() {
   env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
-    KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES="${MR:-3}" KCS_MTP_RETRY_INTERVAL=0 \
+    KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_PULL="${MP:-}" KCS_MTP_DELAY=0 KCS_MTP_RETRIES="${MR:-3}" KCS_MTP_RETRY_INTERVAL=0 \
     KCS_MTP_TIMEOUT="${MT:-20}" bash "$SCRIPT" "$@" </dev/null >"$TMP/stdout" 2>"$TMP/stderr"
 }
-mcalls() { grep -c '^mtp-' "$FAKE_DIR/calls" 2>/dev/null || true; }
+mcalls() { grep -c -E '^(mtp-|kcs-mtp-pull)' "$FAKE_DIR/calls" 2>/dev/null || true; }
+npulls() { grep -c '^kcs-mtp-pull' "$FAKE_DIR/calls" 2>/dev/null || true; }
 mbackups() { find "$MDEST/backups" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' '; }
 
 # Aparelho falso: o arquivo certo esta em /documents; ha copias-isca em outras pastas.
@@ -242,7 +243,8 @@ echo kindle >"$FAKE_DIR/ioreg-mode"; echo 1111 >"$FAKE_DIR/session"; : >"$FAKE_D
 mrun; rc=$?
 check "sai com 0" [ "$rc" -eq 0 ]
 check "copia o arquivo de /documents byte a byte (nao as iscas)" cmp -s "$MDEV/clippings-real.txt" "$MDEST/My Clippings.txt"
-check "baixou o item 130" grep -q '^mtp-getfile 130 ' "$FAKE_DIR/calls"
+check "uma unica sessao MTP (kcs-mtp-pull), sem mtp-files/mtp-getfile" bash -c '[ "$(grep -c "^kcs-mtp-pull" "$1")" -eq 1 ] && ! grep -q "^mtp-" "$1"' _ "$FAKE_DIR/calls"
+check "log registra o item 130 de /documents" grep -q 'baixado via MTP numa sessão: item 130, [0-9]* bytes, /documents/My Clippings.txt' "$LOG"
 check "1 backup" [ "$(mbackups)" -eq 1 ]
 check "nota conta 2 entradas" grep -q '^entradas: 2$' "$MDEST/Kindle Sync.md"
 check "nota indica origem MTP" grep -q 'origem: "MTP (Kindle Paperwhite): documents/My Clippings.txt"' "$MDEST/Kindle Sync.md"
@@ -261,7 +263,7 @@ check "nenhuma notificacao" [ "$(nnotify)" -eq "$n0" ]
 echo "M4) Reconectado (novo sessionID) sem mudancas"
 echo 2222 >"$FAKE_DIR/session"; : >"$FAKE_DIR/calls"
 mrun; rc=$?
-check "abre o MTP de novo" [ "$(mcalls)" -ge 2 ]
+check "abre o MTP de novo (uma sessao)" [ "$(npulls)" -eq 1 ]
 check "nenhum backup novo" [ "$(mbackups)" -eq 1 ]
 check "nenhuma notificacao" [ "$(nnotify)" -eq "$n0" ]
 check "log diz 'sem alterações'" grep -q 'sem alterações (MTP' "$LOG"
@@ -293,7 +295,7 @@ check "log orienta a fechar o Android File Transfer" grep -q 'Feche Android File
 check "notifica uma vez" bash -c '[ "$1" -eq $(($2 + 1)) ] && tail -n1 "$3" | grep -q "ocupado"' _ "$(nnotify)" "$n0" "$NOTIFY_LOG"
 : >"$FAKE_DIR/calls"
 MR=3 mrun
-check "proxima rodada (StartInterval) tenta de novo, mas uma vez so" [ "$(grep -c '^mtp-files' "$FAKE_DIR/calls")" -eq 1 ]
+check "proxima rodada (StartInterval) tenta de novo, mas uma vez so" [ "$(npulls)" -eq 1 ]
 check "mas nao notifica de novo na mesma conexao" [ "$(nnotify)" -eq $((n0 + 1)) ]
 echo 0 >"$FAKE_DIR/busy"
 mrun
@@ -316,7 +318,7 @@ t1="$(date +%s)"
 rm -f "$FAKE_DIR/hang"
 check "sai com erro" [ "$rc" -ne 0 ]
 check "nao espera os 30 s do travamento" [ $((t1 - t0)) -lt 10 ]
-check "log registra o timeout" grep -q 'mtp-files excedeu 1s' "$LOG"
+check "log registra o timeout" grep -q 'kcs-mtp-pull excedeu 1s' "$LOG"
 
 echo "M10) Aparelho sem My Clippings.txt"
 cp "$FAKE_DIR/manifest" "$TMP/manifest.bak"
@@ -339,14 +341,55 @@ echo "M12) Ferramentas achadas pelo PATH (sem KCS_MTP_BIN_DIR)"
 echo 1212 >"$FAKE_DIR/session"; : >"$FAKE_DIR/calls"
 env PATH="$FAKES:$PATH" KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
   KCS_MTP_DELAY=0 bash "$SCRIPT" </dev/null >/dev/null 2>&1; rc=$?
-check "sai com 0 e usa os mtp-*" bash -c '[ "$1" -eq 0 ] && grep -q "^mtp-files" "$2"' _ "$rc" "$FAKE_DIR/calls"
+check "sai com 0 e usa o kcs-mtp-pull do PATH" bash -c '[ "$1" -eq 0 ] && grep -q "^kcs-mtp-pull" "$2"' _ "$rc" "$FAKE_DIR/calls"
 
 echo "M13) KCS_SOURCE=volumes ignora o MTP; --now forca nova leitura"
 : >"$FAKE_DIR/calls"
 KCS_SOURCE=volumes mrun
 check "nenhuma chamada mtp-*" [ "$(mcalls)" -eq 0 ]
 mrun --now
-check "--now abre o MTP mesmo na mesma conexao" [ "$(mcalls)" -ge 2 ]
+check "--now abre o MTP mesmo na mesma conexao" [ "$(mcalls)" -ge 1 ]
+
+echo "M14a) Reserva sem kcs-mtp-pull: ferramentas mtp-* (3 sessoes)"
+entry "Livro MTP" "Destaque G." >>"$MDEV/clippings-real.txt"
+echo 1414 >"$FAKE_DIR/session"; : >"$FAKE_DIR/calls"
+MP=none mrun; rc=$?
+check "sai com 0" [ "$rc" -eq 0 ]
+check "usa mtp-files e mtp-getfile do item 130" bash -c 'grep -q "^mtp-files" "$1" && grep -q "^mtp-getfile 130 " "$1" && ! grep -q "^kcs-mtp-pull" "$1"' _ "$FAKE_DIR/calls"
+check "copia atualizada" cmp -s "$MDEV/clippings-real.txt" "$MDEST/My Clippings.txt"
+check "log avisa do risco das 3 sessoes" grep -q 'kcs-mtp-pull não encontrado' "$LOG"
+
+echo "M14b) Varios disparos ao mesmo tempo (eventos de IOKit repetidos): uma sessao MTP so"
+entry "Livro MTP" "Destaque H." >>"$MDEV/clippings-real.txt"
+echo 1515 >"$FAKE_DIR/session"; : >"$FAKE_DIR/calls"; b0="$(mbackups)"
+for _ in 1 2 3 4; do FAKE_PULL_DELAY=1 mrun & done
+wait
+check "exatamente uma sessao MTP" [ "$(npulls)" -eq 1 ]
+check "exatamente um backup novo" [ "$(mbackups)" -eq $((b0 + 1)) ]
+check "copia atualizada" cmp -s "$MDEV/clippings-real.txt" "$MDEST/My Clippings.txt"
+: >"$FAKE_DIR/calls"
+FAKE_PULL_DELAY=1 mrun
+check "disparo depois da sincronizacao nao abre o MTP" [ "$(mcalls)" -eq 0 ]
+
+echo "M14c) SIGTERM ignorado herdado (como vinha do helper de IOKit)"
+entry "Livro MTP" "Destaque I." >>"$MDEV/clippings-real.txt"
+echo 1616 >"$FAKE_DIR/session"
+t0="$(date +%s)"
+env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" KCS_MTP_BIN_DIR="$FAKES" \
+  KCS_MTP_DELAY=0 KCS_MTP_RETRY_INTERVAL=0 KCS_MTP_TIMEOUT=60 \
+  bash -c 'trap "" TERM; exec bash "$1"' _ "$SCRIPT" </dev/null >/dev/null 2>&1; rc=$?
+t1="$(date +%s)"
+check "comando rapido nao espera o timeout de 60 s" bash -c '[ "$1" -eq 0 ] && [ "$2" -lt 15 ]' _ "$rc" $((t1 - t0))
+check "copia atualizada" cmp -s "$MDEV/clippings-real.txt" "$MDEST/My Clippings.txt"
+echo 1717 >"$FAKE_DIR/session"; touch "$FAKE_DIR/hang"
+t0="$(date +%s)"
+env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" KCS_MTP_BIN_DIR="$FAKES" \
+  KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_TIMEOUT=1 \
+  bash -c 'trap "" TERM; exec bash "$1"' _ "$SCRIPT" </dev/null >/dev/null 2>&1
+t1="$(date +%s)"
+rm -f "$FAKE_DIR/hang"
+check "comando travado que ignora TERM e encerrado com KILL" [ $((t1 - t0)) -lt 15 ]
+check "lock liberado" [ ! -e "$MSTATE/lock" ]
 
 echo "M14) Kindle MTP tem prioridade sobre um volume montado"
 : >"$FAKE_DIR/calls"
@@ -384,6 +427,7 @@ check "script instalado e executavel" [ -x "$IHOME/.local/bin/kindle-clippings-s
 check "plist gerado" [ -f "$IPLIST" ]
 check "plist valido" plist_ok "$IPLIST"
 check "plist sem placeholders" bash -c '! grep -q "__[A-Z_]*__" "$1"' _ "$IPLIST"
+check "sem libmtp: kcs-mtp-pull nao instalado" [ ! -e "$IHOME/.local/libexec/kindle-clippings-sync/kcs-mtp-pull" ]
 if command -v python3 >/dev/null 2>&1; then
   check "StartOnMount true" [ "$(plist_get "$IPLIST" 'd["StartOnMount"]')" = True ]
   check "StartInterval 120" [ "$(plist_get "$IPLIST" 'd["StartInterval"]')" = 120 ]
@@ -400,11 +444,13 @@ echo "13) Com helper de IOKit (--helper-bin) e libmtp no PATH"
 mkdir -p "$TMP/ibrew"
 for t in mtp-files mtp-folders mtp-getfile mtp-common.sh; do ln -sf "$FAKES/$t" "$TMP/ibrew/$t"; done
 IPATH="$TMP/ibrew:/usr/bin:/bin"
-ienv bash "$REPO_DIR/install.sh" --helper-bin "$FAKES/kcs-iokit-trigger" >"$TMP/install.out" 2>&1; rc=$?
+ienv bash "$REPO_DIR/install.sh" --helper-bin "$FAKES/kcs-iokit-trigger" --pull-bin "$FAKES/kcs-mtp-pull" >"$TMP/install.out" 2>&1; rc=$?
 check "install.sh sai com 0" [ "$rc" -eq 0 ]
+check "kcs-mtp-pull instalado" [ -x "$IHOME/.local/libexec/kindle-clippings-sync/kcs-mtp-pull" ]
 check "encontra o libmtp" grep -q "ok: $TMP/ibrew/mtp-files" "$TMP/install.out"
 IHELPER="$IHOME/.local/libexec/kindle-clippings-sync/kcs-iokit-trigger"
 check "helper instalado" [ -x "$IHELPER" ]
+check "instalador informa o kcs-mtp-pull" grep -q 'kcs-mtp-pull' "$TMP/install.out"
 check "plist valido" plist_ok "$IPLIST"
 if command -v python3 >/dev/null 2>&1; then
   M='d["LaunchEvents"]["com.apple.iokit.matching"]["digital.gabriel.kindle-clippings-sync.usb"]'
@@ -447,9 +493,10 @@ echo "15) Script instalado + helper + config gerada, ponta a ponta"
 mkdir -p "$IVAULT"
 echo kindle >"$FAKE_DIR/ioreg-mode"; echo 4242 >"$FAKE_DIR/session"
 IPATH="$TMP/ibrew:$TMP/fakebin:/usr/bin:/bin"
-ienv bash "$REPO_DIR/install.sh" --helper-bin "$FAKES/kcs-iokit-trigger" --dest-subdir "05 Conhecimento/Leituras/_Kindle" >/dev/null 2>&1
+ienv bash "$REPO_DIR/install.sh" --helper-bin "$FAKES/kcs-iokit-trigger" --pull-bin "$FAKES/kcs-mtp-pull" --dest-subdir "05 Conhecimento/Leituras/_Kindle" >/dev/null 2>&1
 ienv KCS_MTP_DELAY=0 "$IHELPER" /bin/bash "$IHOME/.local/bin/kindle-clippings-sync" </dev/null >/dev/null 2>&1; rc=$?
 check "roda pelo helper com a config instalada" bash -c '[ "$1" -eq 0 ] && cmp -s "$2" "$3"' _ "$rc" "$MDEV/clippings-real.txt" "$IVAULT/05 Conhecimento/Leituras/_Kindle/My Clippings.txt"
+check "usou o kcs-mtp-pull instalado (uma sessao)" grep -q 'baixado via MTP numa sessão' "$IHOME/Library/Logs/kindle-clippings-sync.log"
 echo none >"$FAKE_DIR/ioreg-mode"
 
 echo "16) uninstall.sh"

@@ -25,6 +25,8 @@
 #   KCS_MAX_BACKUPS         manter so os N backups mais recentes; 0 = todos (padrao: 0)
 #  MTP:
 #   KCS_USB_VENDOR_ID       idVendor do Kindle em decimal (padrao: 6473 = 0x1949, Amazon)
+#   KCS_MTP_PULL            programa de download numa sessao so (padrao: ~/.local/libexec/
+#                           kindle-clippings-sync/kcs-mtp-pull; "none" usa as ferramentas mtp-*)
 #   KCS_MTP_BIN_DIR         pasta das ferramentas mtp-* (padrao: PATH, /opt/homebrew/bin, /usr/local/bin)
 #   KCS_MTP_DELAY           segundos de espera apos detectar o aparelho (padrao: 3)
 #   KCS_MTP_RETRIES         tentativas se o MTP estiver ocupado (padrao: 4)
@@ -49,7 +51,7 @@ CLIPPINGS_NAME="My Clippings.txt"
 CLIPPINGS_REL="documents/$CLIPPINGS_NAME"
 
 CONFIG_VARS="KCS_VAULT KCS_DEST_SUBDIR KCS_DEST KCS_SOURCE KCS_LOG KCS_STATE_DIR KCS_NOTIFY \
-KCS_MAX_BACKUPS KCS_USB_VENDOR_ID KCS_MTP_BIN_DIR KCS_MTP_DELAY KCS_MTP_RETRIES \
+KCS_MAX_BACKUPS KCS_USB_VENDOR_ID KCS_MTP_PULL KCS_MTP_BIN_DIR KCS_MTP_DELAY KCS_MTP_RETRIES \
 KCS_MTP_RETRY_INTERVAL KCS_MTP_TIMEOUT KCS_MTP_RESYNC_SECONDS KCS_MTP_KILL_PTPCAMERAD \
 KCS_VOLUMES_ROOT KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_MOUNT_WINDOW KCS_REQUIRE_MARKER"
 
@@ -60,7 +62,7 @@ for arg in "$@"; do
     --now|--run-now) NOW=1 ;;
     --force) FORCE=1; NOW=1 ;;
     --version) echo "kindle-clippings-sync $VERSION"; exit 0 ;;
-    -h|--help) sed -n '2,46p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,48p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opcao desconhecida: $arg" >&2; exit 2 ;;
   esac
 done
@@ -92,6 +94,7 @@ KCS_STATE_DIR="${KCS_STATE_DIR:-$HOME/Library/Application Support/kindle-clippin
 KCS_NOTIFY="${KCS_NOTIFY:-1}"
 KCS_MAX_BACKUPS="${KCS_MAX_BACKUPS:-0}"
 KCS_USB_VENDOR_ID="${KCS_USB_VENDOR_ID:-6473}"
+KCS_MTP_PULL="${KCS_MTP_PULL:-}"
 KCS_MTP_BIN_DIR="${KCS_MTP_BIN_DIR:-}"
 KCS_MTP_DELAY="${KCS_MTP_DELAY:-3}"
 KCS_MTP_RETRIES="${KCS_MTP_RETRIES:-4}"
@@ -115,9 +118,12 @@ fi
 LOCK="$KCS_STATE_DIR/lock"
 WORK=""
 HAVE_LOCK=0
+RUNNING_PIDS=""
 
 # shellcheck disable=SC2329 # chamada pelo trap
 cleanup() {
+  local p
+  for p in $RUNNING_PIDS; do kill -KILL "$p" 2>/dev/null; done
   [ -n "$WORK" ] && rm -rf "$WORK"
   [ "$HAVE_LOCK" = 1 ] && rm -rf "$LOCK"
   return 0
@@ -173,17 +179,29 @@ notify() {
 }
 
 # Roda um comando com limite de tempo (o macOS nao tem `timeout`).
+# Nao depende de SIGTERM: se o processo herdou SIGTERM ignorado (o que acontecia
+# via helper de IOKit), "kill" comum nao encerra o vigia nem o comando. Por isso o
+# vigia e parado com STOP/KILL e o comando recebe KILL 2 s depois do TERM.
 run_with_timeout() {
   local secs="$1" pid watcher rc
   shift
   "$@" &
   pid=$!
-  ( sleep "$secs"; kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  (
+    sleep "$secs"
+    kill -TERM "$pid" 2>/dev/null
+    sleep 2
+    kill -KILL "$pid" 2>/dev/null
+  ) >/dev/null 2>&1 &
   watcher=$!
+  RUNNING_PIDS="$pid $watcher"
   wait "$pid"
   rc=$?
-  kill "$watcher" 2>/dev/null
+  kill -STOP "$watcher" 2>/dev/null
+  pkill -KILL -P "$watcher" 2>/dev/null
+  kill -KILL "$watcher" 2>/dev/null
   wait "$watcher" 2>/dev/null
+  RUNNING_PIDS=""
   return "$rc"
 }
 
@@ -425,6 +443,41 @@ mtp_holders() {
 # Baixa My Clippings.txt via MTP para "$1".
 # Retorno: 0 ok, 2 ocupado/indisponivel, 3 arquivo nao existe no aparelho, 1 outro erro.
 mtp_pull() {
+  if [ -n "$MTP_PULL" ]; then
+    mtp_pull_single "$1"
+  else
+    mtp_pull_tools "$1"
+  fi
+}
+
+# Caminho preferido: kcs-mtp-pull, uma unica sessao do libmtp e sem reset USB
+# ao fechar (o reset derrubava o Kindle Paperwhite do USB).
+mtp_pull_single() {
+  local out="$1" txt="$WORK/mtp-pull.txt" rc
+  rm -f "$out"
+  run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_PULL" "$out" >"$txt" 2>&1 </dev/null
+  rc=$?
+  if [ "$rc" -gt 128 ]; then log "kcs-mtp-pull excedeu ${KCS_MTP_TIMEOUT}s"; return 2; fi
+  case "$rc" in
+    0)
+      if [ ! -f "$out" ]; then
+        log "kcs-mtp-pull terminou sem gerar o arquivo: $(tr '\n' ' ' <"$txt" | cut -c1-300)"
+        return 1
+      fi
+      log "baixado via MTP numa sessão: $(grep '^OK ' "$txt" | sed 's/^OK \([0-9]*\) \([0-9]*\) /item \1, \2 bytes, /')"
+      return 0
+      ;;
+    2|3) return "$rc" ;;
+    *)
+      mtp_busy "$txt" && return 2
+      log "kcs-mtp-pull falhou (código $rc): $(tr '\n' ' ' <"$txt" | cut -c1-300)"
+      return 1
+      ;;
+  esac
+}
+
+# Reserva: ferramentas de linha de comando do libmtp (tres sessoes).
+mtp_pull_tools() {
   local out="$1" files_txt="$WORK/mtp-files.txt" folders_txt="$WORK/mtp-folders.txt"
   local get_txt="$WORK/mtp-getfile.txt" docs cands chosen id size got rc
 
@@ -491,8 +544,32 @@ mtp_pull() {
   return 0
 }
 
+# Esta conexao USB ja foi sincronizada (e nao e hora de reler)?
+session_done() {
+  local key="$1" now last_key last_time
+  [ "$NOW" != 1 ] || return 1
+  [ -f "$KCS_STATE_DIR/mtp-session" ] || return 1
+  now="$(date +%s)"
+  last_key="$(cut -f1 <"$KCS_STATE_DIR/mtp-session")"
+  last_time="$(cut -f2 <"$KCS_STATE_DIR/mtp-session")"
+  [ "$last_key" = "$key" ] || return 1
+  if [ "$KCS_MTP_RESYNC_SECONDS" -le 0 ] 2>/dev/null; then return 0; fi
+  [ $((now - ${last_time:-0})) -lt "$KCS_MTP_RESYNC_SECONDS" ]
+}
+
+find_mtp_pull() {
+  local def="$HOME/.local/libexec/kindle-clippings-sync/kcs-mtp-pull"
+  case "$KCS_MTP_PULL" in
+    none) return 1 ;;
+    '') ;;
+    *) [ -x "$KCS_MTP_PULL" ] && { echo "$KCS_MTP_PULL"; return 0; }; return 1 ;;
+  esac
+  [ -x "$def" ] && { echo "$def"; return 0; }
+  find_mtp_tool kcs-mtp-pull
+}
+
 run_mtp() {
-  local info key name session_file now last_key last_time rc attempt holders tmpfile
+  local info key name session_file now rc attempt holders tmpfile
 
   info="$(usb_kindles | head -n 1)"
   [ -n "$info" ] || return 10 # nenhum Kindle no USB
@@ -503,18 +580,12 @@ run_mtp() {
 
   # Ja sincronizado nesta conexao? Sai sem abrir o MTP (barato para o StartInterval
   # e para disparos repetidos do evento de IOKit).
-  if [ "$NOW" != 1 ] && [ -f "$session_file" ]; then
-    last_key="$(cut -f1 <"$session_file")"
-    last_time="$(cut -f2 <"$session_file")"
-    if [ "$last_key" = "$key" ]; then
-      if [ "$KCS_MTP_RESYNC_SECONDS" -le 0 ] 2>/dev/null ||
-        [ $((now - ${last_time:-0})) -lt "$KCS_MTP_RESYNC_SECONDS" ]; then
-        return 0
-      fi
-    fi
-  fi
+  session_done "$key" && return 0
 
+  # So uma sincronizacao por vez; quem chegar depois sai sem abrir o MTP.
   acquire_lock
+  # Outra execucao pode ter terminado esta mesma conexao enquanto esperavamos.
+  session_done "$key" && return 0
 
   # Ja falhou nesta conexao (aparelho ocupado)? Nas rodadas automaticas seguintes
   # tenta so uma vez, para nao segurar o job nem encher o log.
@@ -522,10 +593,11 @@ run_mtp() {
     KCS_MTP_RETRIES=1
   fi
 
+  MTP_PULL="$(find_mtp_pull)"
   MTP_FILES="$(find_mtp_tool mtp-files)"
   MTP_GETFILE="$(find_mtp_tool mtp-getfile)"
   MTP_FOLDERS="$(find_mtp_tool mtp-folders)"
-  if [ -z "$MTP_FILES" ] || [ -z "$MTP_GETFILE" ]; then
+  if [ -z "$MTP_PULL" ] && { [ -z "$MTP_FILES" ] || [ -z "$MTP_GETFILE" ]; }; then
     log "erro: $name conectado via MTP, mas o libmtp não foi encontrado (procurei no PATH, /opt/homebrew/bin e /usr/local/bin). Rode: brew install libmtp"
     if [ "$(cat "$KCS_STATE_DIR/mtp-notified" 2>/dev/null)" != "$key" ]; then
       notify "Instale o libmtp: brew install libmtp" "Kindle: erro"
@@ -533,7 +605,10 @@ run_mtp() {
     fi
     return 1
   fi
-  [ -z "$MTP_FOLDERS" ] && log "aviso: mtp-folders não encontrado; não dá para confirmar a pasta documents"
+  if [ -z "$MTP_PULL" ]; then
+    log "aviso: kcs-mtp-pull não encontrado (rode ./install.sh); usando mtp-files/mtp-folders/mtp-getfile, que abrem 3 sessões e podem derrubar o Kindle do USB"
+    [ -z "$MTP_FOLDERS" ] && log "aviso: mtp-folders não encontrado; não dá para confirmar a pasta documents"
+  fi
 
   [ "$KCS_MTP_DELAY" -gt 0 ] 2>/dev/null && sleep "$KCS_MTP_DELAY"
 

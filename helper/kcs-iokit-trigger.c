@@ -17,16 +17,37 @@
  */
 #include <dispatch/dispatch.h>
 #include <xpc/xpc.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 
 static char **g_cmd = NULL;
 
+/*
+ * O libdispatch/XPC deixa sinais ignorados ou bloqueados neste processo, e o
+ * execv() herda isso. Sem esta limpeza o bash recebia SIGTERM ignorado ("sinais
+ * ignorados na entrada nao podem ser capturados"), entao nem o timeout do
+ * script nem um kill comum conseguiam encerrar os processos filhos.
+ */
+static void reset_signals(void) {
+    sigset_t empty;
+    int sig;
+    for (sig = 1; sig < NSIG; sig++) {
+        if (sig == SIGKILL || sig == SIGSTOP) {
+            continue;
+        }
+        signal(sig, SIG_DFL);
+    }
+    sigemptyset(&empty);
+    sigprocmask(SIG_SETMASK, &empty, NULL);
+}
+
 static void run_command(void) {
     if (g_cmd == NULL || g_cmd[0] == NULL) {
         exit(0);
     }
+    reset_signals();
     execv(g_cmd[0], g_cmd);
     perror("kcs-iokit-trigger: execv");
     exit(127);

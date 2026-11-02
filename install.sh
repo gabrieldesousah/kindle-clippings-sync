@@ -13,6 +13,7 @@
 #   --interval SEGUNDOS    StartInterval de reserva (padrao: 120; 0 desliga)
 #   --no-iokit             nao usa o gatilho de conexao USB (so StartInterval/StartOnMount)
 #   --helper-bin CAMINHO   usa um kcs-iokit-trigger ja compilado em vez de compilar
+#   --pull-bin CAMINHO     usa um kcs-mtp-pull ja compilado em vez de compilar
 #   --run-now              depois de instalar, dispara o job pelo launchd e mostra o log
 #   --test                 depois de instalar, roda o script em primeiro plano (--now)
 #   --no-load              nao carrega o job no launchd
@@ -24,6 +25,7 @@ LABEL="digital.gabriel.kindle-clippings-sync"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 SRC_SCRIPT="$REPO_DIR/bin/kindle-clippings-sync.sh"
 HELPER_SRC="$REPO_DIR/helper/kcs-iokit-trigger.c"
+PULL_SRC="$REPO_DIR/helper/kcs-mtp-pull.c"
 TEMPLATE="$REPO_DIR/launchd/$LABEL.plist.template"
 
 CONFIG_DIR="$HOME/.config/kindle-clippings-sync"
@@ -33,6 +35,7 @@ PLIST="$AGENTS_DIR/$LABEL.plist"
 LOG_FILE="$HOME/Library/Logs/kindle-clippings-sync.log"
 LIBEXEC="$HOME/.local/libexec/kindle-clippings-sync"
 HELPER="$LIBEXEC/kcs-iokit-trigger"
+PULL="$LIBEXEC/kcs-mtp-pull"
 
 # Chaves gravadas na config (valores existentes sao preservados em reinstalacoes).
 CONFIG_KEYS="KCS_VAULT KCS_DEST_SUBDIR KCS_SOURCE KCS_NOTIFY KCS_MAX_BACKUPS \
@@ -71,13 +74,14 @@ OPT_PRODUCT=""
 OPT_INTERVAL=""
 OPT_IOKIT=""
 HELPER_BIN=""
+PULL_BIN=""
 PREFIX="${KCS_PREFIX:-$HOME/.local/bin}"
 INSTALL_DEPS=0
 RUN_NOW=0
 RUN_TEST=0
 LOAD=1
 
-usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -89,6 +93,7 @@ while [ $# -gt 0 ]; do
     --interval) OPT_INTERVAL="${2:?--interval precisa de segundos}"; shift 2 ;;
     --no-iokit) OPT_IOKIT=0; shift ;;
     --helper-bin) HELPER_BIN="${2:?--helper-bin precisa de um caminho}"; shift 2 ;;
+    --pull-bin) PULL_BIN="${2:?--pull-bin precisa de um caminho}"; shift 2 ;;
     --run-now) RUN_NOW=1; shift ;;
     --test) RUN_TEST=1; shift ;;
     --no-load) LOAD=0; shift ;;
@@ -201,6 +206,46 @@ if [ "$KCS_IOKIT_TRIGGER" = 1 ]; then
     echo "    Sem o helper, o gatilho de conexao USB fica desligado (ele relancaria o job em loop)."
     echo "    O Kindle sera detectado pelo StartInterval (a cada ${KCS_START_INTERVAL}s)."
   fi
+fi
+
+# --- kcs-mtp-pull: download MTP numa sessao so -----------------------------
+# As ferramentas mtp-* abrem uma sessao cada e o libmtp reseta o USB ao fechar
+# (flag FORCE_RESET_ON_CLOSE do 1949:9981), o que derruba o Kindle Paperwhite.
+mkdir -p "$LIBEXEC"
+can_build() {
+  [ "${KCS_HELPER_BUILD:-1}" = 1 ] && [ "$(uname -s)" = Darwin ] &&
+    xcode-select -p >/dev/null 2>&1 && xcrun --find clang >/dev/null 2>&1
+}
+libmtp_flags() {
+  local pc
+  if pc="$(find_tool pkg-config)" && "$pc" --exists libmtp 2>/dev/null; then
+    "$pc" --cflags --libs libmtp
+    return 0
+  fi
+  for d in /opt/homebrew/opt/libmtp /usr/local/opt/libmtp; do
+    if [ -f "$d/include/libmtp.h" ]; then
+      echo "-I$d/include -L$d/lib -lmtp"
+      return 0
+    fi
+  done
+  return 1
+}
+if [ -n "$PULL_BIN" ]; then
+  [ -x "$PULL_BIN" ] || { echo "erro: --pull-bin nao e executavel: $PULL_BIN" >&2; exit 1; }
+  cp "$PULL_BIN" "$PULL.tmp.$$" && chmod 755 "$PULL.tmp.$$" && mv -f "$PULL.tmp.$$" "$PULL"
+  echo "==> kcs-mtp-pull instalado de $PULL_BIN"
+elif can_build && MTP_FLAGS="$(libmtp_flags)"; then
+  echo "==> Compilando $PULL (xcrun clang + libmtp)"
+  # shellcheck disable=SC2086 # MTP_FLAGS sao varias opcoes
+  if xcrun clang -O2 -Wall -o "$PULL.tmp.$$" "$PULL_SRC" $MTP_FLAGS 2>/tmp/kcs-pull-build.log; then
+    mv -f "$PULL.tmp.$$" "$PULL"
+  else
+    rm -f "$PULL.tmp.$$"
+    echo "    AVISO: falha ao compilar o kcs-mtp-pull (veja /tmp/kcs-pull-build.log)."
+    echo "    O script vai usar mtp-files/mtp-getfile, que podem derrubar o Kindle do USB."
+  fi
+else
+  echo "==> AVISO: kcs-mtp-pull nao compilado (precisa do libmtp e das Command Line Tools)."
 fi
 
 # --- config ----------------------------------------------------------------
