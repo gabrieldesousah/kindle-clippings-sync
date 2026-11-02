@@ -11,6 +11,12 @@ else
   echo "shellcheck nao encontrado; pulando"
 fi
 
+if command -v python3 >/dev/null 2>&1; then
+  for f in lib/kcs_highlights.py tests/fixtures/make-kindle-hl.py tests/fakes/pylib/kfxlib/__init__.py; do
+    python3 -c 'import ast, sys; ast.parse(open(sys.argv[1], encoding="utf-8").read(), sys.argv[1])' "$f" || { echo "erro de sintaxe: $f"; rc=1; }
+  done
+fi
+
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/kcs-lint.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 validate() {

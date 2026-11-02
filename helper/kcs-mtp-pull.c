@@ -20,8 +20,20 @@
  *   --get CAMINHO DEST      baixa o arquivo de caminho absoluto no aparelho
  *   --get-id ID DEST        baixa pelo item id (ids mudam entre sessoes!)
  *   --get-dir CAMINHO DIR   baixa todos os arquivos diretamente dentro da pasta
+ *   --list-to ARQUIVO       grava a mesma listagem em ARQUIVO (nao no stdout)
+ *   --get-match PADRAO DIR  baixa os arquivos cujo caminho casa com PADRAO
+ *                           (fnmatch, ex.: '/system/ksdk/.annotations/amzn1.account.*'
+ *                           '/ksdk_annotation_v1.db') para DIR/<caminho no aparelho>
+ *   --then PROGRAMA         roda PROGRAMA (sem argumentos, com KCS_TREE apontando
+ *                           para o arquivo do --list-to) com a sessao ainda aberta e
+ *                           baixa cada linha "GET<TAB>caminho<TAB>destino" que ele
+ *                           imprimir. Serve para decidir o que baixar depois de ler
+ *                           o que ja veio (ex.: livros com destaques novos)
  *   Cada download imprime: GOT <id> <bytes> <caminho> -> <dest>
  *   Falhas imprimem ERR ... em stderr e o codigo de saida vira 1.
+ *   As operacoes rodam na ordem da linha de comando. Com <arquivo-destino> junto,
+ *   o My Clippings.txt e baixado primeiro e o codigo de saida e o dele; erros das
+ *   outras operacoes so aparecem como ERR.
  *   --allow-reset           mantem o reset ao fechar (comportamento padrao do libmtp)
  *   --no-release-interface  nao libera a interface USB ao fechar
  *                           (DEVICE_FLAG_NO_RELEASE_INTERFACE), para aparelhos
@@ -43,7 +55,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
+#include <fnmatch.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #define KCS_AMAZON_VID 0x1949
 #define KCS_FLAG_FORCE_RESET_ON_CLOSE 0x10000000u /* src/device-flags.h */
@@ -173,24 +190,155 @@ static int fetch(LIBMTP_mtpdevice_t *dev, const node_t *n, const char *dest) {
     return 0;
 }
 
+static int mkdirs_for(const char *file) {
+    char buf[2048];
+    char *p;
+    snprintf(buf, sizeof(buf), "%s", file);
+    for (p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            if (mkdir(buf, 0755) != 0 && errno != EEXIST) {
+                return 1;
+            }
+            *p = '/';
+        }
+    }
+    return 0;
+}
+
+static node_t *find_path(const char *path) {
+    size_t k;
+    for (k = 0; k < nnodes; k++) {
+        if (strcmp(nodes[k].path, path) == 0) {
+            return &nodes[k];
+        }
+    }
+    return NULL;
+}
+
+static void print_list(FILE *out) {
+    size_t k;
+    for (k = 0; k < nnodes; k++) {
+        fprintf(out, "%c\t%u\t%u\t%u\t%llu\t%ld\t%s\n", nodes[k].folder ? 'd' : 'f',
+                nodes[k].id, nodes[k].parent, nodes[k].storage,
+                (unsigned long long)nodes[k].size, nodes[k].mtime, nodes[k].path);
+    }
+    fflush(out);
+}
+
+/* Roda o programa do --then e baixa o que ele pedir. */
+static int run_then(LIBMTP_mtpdevice_t *dev, const char *prog, const char *tree) {
+    int fds[2], status, rc = 0, n = 0;
+    pid_t pid;
+    FILE *in;
+    char line[4096];
+    if (pipe(fds) != 0) {
+        fprintf(stderr, "ERR then: pipe\n");
+        return 1;
+    }
+    fflush(stdout);
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "ERR then: fork\n");
+        return 1;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        dup2(fds[1], 1);
+        close(fds[1]);
+        if (tree != NULL) {
+            setenv("KCS_TREE", tree, 1);
+        }
+        execl(prog, prog, (char *)NULL);
+        fprintf(stderr, "ERR then: nao consegui rodar %s\n", prog);
+        _exit(127);
+    }
+    close(fds[1]);
+    in = fdopen(fds[0], "r");
+    while (in != NULL && fgets(line, sizeof(line), in) != NULL) {
+        char *path, *dest, *nl;
+        node_t *nd;
+        if (strncmp(line, "GET\t", 4) != 0) {
+            continue;
+        }
+        nl = strchr(line, '\n');
+        if (nl != NULL) {
+            *nl = '\0';
+        }
+        path = line + 4;
+        dest = strchr(path, '\t');
+        if (dest == NULL) {
+            continue;
+        }
+        *dest++ = '\0';
+        n++;
+        nd = find_path(path);
+        if (nd == NULL) {
+            fprintf(stderr, "ERR nao encontrado: %s\n", path);
+            rc = 1;
+            continue;
+        }
+        mkdirs_for(dest);
+        rc |= fetch(dev, nd, dest);
+    }
+    if (in != NULL) {
+        fclose(in);
+    }
+    if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "ERR then: %s terminou com erro\n", prog);
+        rc = 1;
+    }
+    fprintf(stderr, "kcs-mtp-pull: then: %d pedido(s)\n", n);
+    return rc;
+}
+
 static int inventory(LIBMTP_mtpdevice_t *dev, int argc, char **argv, int list) {
     LIBMTP_devicestorage_t *st;
     size_t k;
     int i, rc = 0;
+    const char *tree = NULL;
     for (st = dev->storage; st != NULL; st = st->next) {
         walk(dev, st->id, LIBMTP_FILES_AND_FOLDERS_ROOT, "", 1);
     }
     if (list) {
-        for (k = 0; k < nnodes; k++) {
-            printf("%c\t%u\t%u\t%u\t%llu\t%ld\t%s\n", nodes[k].folder ? 'd' : 'f',
-                   nodes[k].id, nodes[k].parent, nodes[k].storage,
-                   (unsigned long long)nodes[k].size, nodes[k].mtime, nodes[k].path);
-        }
-        fflush(stdout);
+        print_list(stdout);
     }
     for (i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (strcmp(a, "--get") == 0 || strcmp(a, "--get-id") == 0 ||
+        if (strcmp(a, "--list-to") == 0) {
+            FILE *out = fopen(argv[i + 1], "w");
+            tree = argv[++i];
+            if (out == NULL) {
+                fprintf(stderr, "ERR nao consegui gravar %s\n", tree);
+                rc = 1;
+                tree = NULL;
+            } else {
+                print_list(out);
+                fclose(out);
+            }
+        } else if (strcmp(a, "--then") == 0) {
+            rc |= run_then(dev, argv[++i], tree);
+        } else if (strcmp(a, "--get-match") == 0) {
+            const char *pat = argv[i + 1], *dir = argv[i + 2];
+            int found = 0;
+            i += 2;
+            for (k = 0; k < nnodes; k++) {
+                if (!nodes[k].folder && fnmatch(pat, nodes[k].path, 0) == 0) {
+                    char out[2048];
+                    snprintf(out, sizeof(out), "%s%s", dir, nodes[k].path);
+                    if (mkdirs_for(out) != 0) {
+                        fprintf(stderr, "ERR nao consegui criar a pasta de %s\n", out);
+                        rc = 1;
+                        continue;
+                    }
+                    rc |= fetch(dev, &nodes[k], out);
+                    found++;
+                }
+            }
+            if (!found) {
+                fprintf(stderr, "kcs-mtp-pull: nada casou com %s\n", pat);
+            }
+        } else if (strcmp(a, "--get") == 0 || strcmp(a, "--get-id") == 0 ||
             strcmp(a, "--get-dir") == 0) {
             const char *key = argv[i + 1], *dest = argv[i + 2];
             int found = 0;
@@ -244,8 +392,15 @@ int main(int argc, char **argv) {
             no_release = 1;
         } else if (strcmp(argv[i], "--list") == 0) {
             inv_mode = list = 1;
+        } else if (strcmp(argv[i], "--list-to") == 0 || strcmp(argv[i], "--then") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "uso: %s exige 1 argumento\n", argv[i]);
+                return 64;
+            }
+            inv_mode = 1;
+            i += 1;
         } else if (strcmp(argv[i], "--get") == 0 || strcmp(argv[i], "--get-id") == 0 ||
-                   strcmp(argv[i], "--get-dir") == 0) {
+                   strcmp(argv[i], "--get-dir") == 0 || strcmp(argv[i], "--get-match") == 0) {
             if (i + 2 >= argc) {
                 fprintf(stderr, "uso: %s exige 2 argumentos\n", argv[i]);
                 return 64;
@@ -310,7 +465,7 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    if (inv_mode) {
+    if (inv_mode && dest == NULL) {
         rc = inventory(dev, argc, argv, list);
         LIBMTP_Release_Device(dev);
         free(raw);
@@ -359,6 +514,14 @@ int main(int argc, char **argv) {
     } else {
         printf("OK %u %llu %s\n", best.id, (unsigned long long)best.size, best.where);
         rc = 0;
+    }
+    fflush(stdout);
+
+    /* Operacoes extras na mesma sessao (destaques, livros). Nao mudam o codigo. */
+    if (inv_mode && rc != 2) {
+        if (inventory(dev, argc, argv, list) != 0) {
+            fprintf(stderr, "kcs-mtp-pull: operacoes extras com erro (veja ERR acima)\n");
+        }
     }
 
     LIBMTP_Release_Device(dev);

@@ -27,6 +27,12 @@ static const ent_t tree[] = {
     {27, 26, 0, "inner.bin", 5},
     {2, LIBMTP_FILES_AND_FOLDERS_ROOT, 1, "system", 0},
     {30, 2, 0, "version.txt", 30},
+    {31, 2, 1, "ksdk", 0},
+    {32, 31, 1, ".annotations", 0},
+    {33, 32, 1, "amzn1.account.TESTE", 0},
+    {34, 33, 0, "ksdk_annotation_v1.db", 64},
+    {35, 32, 1, "anonymous", 0},
+    {36, 35, 0, "ksdk_annotation_v1.db", 16},
 };
 #define NTREE (sizeof(tree) / sizeof(tree[0]))
 

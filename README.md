@@ -78,6 +78,30 @@ Por padrão cada conexão é sincronizada uma vez. Se você costuma deixar o Kin
 
 Outros Kindles têm outro `idProduct`. Veja o seu com `ioreg -p IOUSB -l -w0 | grep -E '"(USB Product Name|idVendor|idProduct)"'` e reinstale com `--product-id N` (decimal), ou `--product-id any` para qualquer aparelho Amazon.
 
+## Destaques do banco de anotações (firmware 5.19.6+)
+
+A partir do firmware 5.19.6 o Kindle parou de escrever destaques novos no `My Clippings.txt`. Eles continuam no aparelho, num banco SQLite por conta: `/system/ksdk/.annotations/amzn1.account.<conta>/ksdk_annotation_v1.db` (tabela `server_view`; só posições, sem o texto). O script coleta esse banco na **mesma sessão MTP** do `My Clippings.txt`, sem abrir uma segunda conexão:
+
+1. o `kcs-mtp-pull` baixa o `My Clippings.txt` como antes (essa parte não mudou) e, na mesma sessão, grava a lista de arquivos (`--list-to`), baixa os bancos `amzn1.account.*` (`--get-match`; o banco `anonymous` é ignorado) e chama `--then`, que roda `kcs_highlights.py select`;
+2. o `select` lê os bancos e devolve os `.kfx` dos livros com destaques ou notas, só os que mudaram de tamanho ou data desde a última vez; o `kcs-mtp-pull` baixa esses livros para `~/Library/Caches/kindle-clippings-sync/books/` (nunca para o cofre) e fecha a sessão, com o reset desligado;
+3. depois da sessão, `kcs_highlights.py render` tira o texto de cada destaque do `.kfx` com o **kfxlib** e escreve uma nota por livro em `<destino>/Destaques/<Título>.md`, no mesmo estilo do `Kindle Sync.md`: frontmatter, capítulos pelo sumário do livro, citações, "Posição X-Y" e data, notas do Kindle junto do destaque;
+4. o banco bruto é copiado para `<destino>/backups/ksdk_annotation_v1 AAAA-MM-DD HHMMSS.db` sempre que muda (respeita `KCS_MAX_BACKUPS`).
+
+Detalhes:
+
+- Deduplicação por id da anotação + data de alteração (estado em `~/Library/Application Support/kindle-clippings-sync/highlights/`). Destaque alterado no Kindle atualiza a nota; destaque apagado no Kindle continua na nota, marcado como "removido no Kindle" (`removidos_no_kindle` no frontmatter).
+- `texto_verificado: true` no frontmatter quando todo o texto veio do livro; `false` quando a nota tem só posições, com o motivo: kfxlib não instalado, livro protegido (DRM) ou ilegível, livro ainda não baixado no Kindle ou fora do aparelho.
+- A nota só é reescrita quando o conteúdo muda. Nada é escrito no Kindle: o `kcs-mtp-pull` só lê.
+- Aspas curvas viram retas, travessões viram `-` e chamadas de nota de rodapé grudadas na pontuação (`palavra.17`) são removidas do texto citado.
+
+### kfxlib (GPL v3, instalado à parte)
+
+O kfxlib é de John Howell (plugin KFX Input do Calibre), licença **GNU GPL v3**. Ele **não** faz parte deste repositório (MIT) e não é copiado para cá. O `install.sh` baixa uma cópia do kfxlib de um commit fixo do [kaikozlov/kindle.koplugin](https://github.com/kaikozlov/kindle.koplugin) (`python/kfxlib`, commit `501488f`) para `~/.local/libexec/kindle-clippings-sync/kfxlib/`, com um `SOURCE.txt` que registra origem, commit e licença. O extrator chama o kfxlib como biblioteca separada, só no seu Mac.
+
+O Python usado é o do Mac: o instalador procura `/opt/homebrew/bin/python3`, depois `/usr/local/bin/python3` e `/usr/bin/python3` (Command Line Tools), versão 3.9 ou mais nova, e cria um venv próprio em `~/.local/libexec/kindle-clippings-sync/venv` com `pypdf pillow lxml beautifulsoup4` (o `pip` roda só dentro do venv; nada do sistema muda). Para escolher outro Python: `KCS_PY_BASE=/caminho/python3 ./install.sh`. Para não instalar nada disso: `./install.sh --no-highlights`.
+
+Sem Python ou sem kfxlib o `My Clippings.txt` continua sincronizado normalmente; as notas de destaques saem só com posições.
+
 ## Instalação
 
 No Mac, no Terminal:
@@ -98,6 +122,7 @@ O instalador:
 - confere o libmtp (`mtp-files`, `mtp-folders`, `mtp-getfile` no PATH, em `/opt/homebrew/bin` ou `/usr/local/bin`) e mostra `brew install libmtp` se faltar; com `--install-deps` instala pelo Homebrew;
 - copia o script para `~/.local/bin/kindle-clippings-sync`;
 - compila o helper em `~/.local/libexec/kindle-clippings-sync/kcs-iokit-trigger`;
+- instala o extrator de destaques (`kcs_highlights.py`), cria o venv e baixa o kfxlib (veja acima; `--no-highlights` pula);
 - grava a config em `~/.config/kindle-clippings-sync/config.env`;
 - gera `~/Library/LaunchAgents/digital.gabriel.kindle-clippings-sync.plist` a partir do template em `launchd/`;
 - carrega o job com `launchctl bootstrap gui/$(id -u)` (ou `launchctl load -w`, se o primeiro falhar).
@@ -115,6 +140,7 @@ Pode rodar o `install.sh` de novo quantas vezes quiser (por exemplo depois de um
 | `--no-iokit` | não usa o gatilho de conexão USB |
 | `--helper-bin CAMINHO` | usa um helper já compilado |
 | `--pull-bin CAMINHO` | usa um `kcs-mtp-pull` já compilado |
+| `--no-highlights` | não instala o extrator de destaques e grava `KCS_HIGHLIGHTS=0` |
 | `--test` | depois de instalar, roda o script no Terminal (`--now`) |
 | `--run-now` | depois de instalar, dispara via `launchctl kickstart` e mostra o log |
 | `--no-load` | só gera os arquivos, sem carregar no `launchd` |
@@ -123,10 +149,10 @@ Pode rodar o `install.sh` de novo quantas vezes quiser (por exemplo depois de um
 
 ```bash
 ./uninstall.sh           # remove o LaunchAgent, o script e o helper
-./uninstall.sh --purge   # também apaga config, estado interno e log
+./uninstall.sh --purge   # também apaga config, estado interno, cache de livros e log
 ```
 
-Nada dentro do cofre do Obsidian é apagado: a cópia, os backups e a nota continuam lá. O libmtp continua instalado (`brew uninstall libmtp` se quiser).
+O venv e o kfxlib (em `~/.local/libexec/kindle-clippings-sync`) saem sempre. Nada dentro do cofre do Obsidian é apagado: a cópia, os backups, a nota e as notas de `Destaques/` continuam lá. O libmtp continua instalado (`brew uninstall libmtp` se quiser).
 
 ## Configuração
 
@@ -157,6 +183,13 @@ O arquivo `~/.config/kindle-clippings-sync/config.env` é um shell simples e pod
 | `KCS_MOUNT_DELAY` | `5` | espera depois de uma montagem recente |
 | `KCS_RETRIES` / `KCS_RETRY_INTERVAL` | `3` / `5` | tentativas em `/Volumes` |
 | `KCS_REQUIRE_MARKER` | `1` | `0` aceita qualquer volume com `documents/My Clippings.txt` |
+| `KCS_HIGHLIGHTS` | `auto` | destaques do banco de anotações: `auto` (se o extrator estiver instalado), `1` ou `0` |
+| `KCS_HIGHLIGHTS_SUBDIR` | `Destaques` | pasta das notas de destaques dentro do destino |
+| `KCS_PYTHON` | `~/.local/libexec/kindle-clippings-sync/venv/bin/python` | Python do extrator |
+| `KCS_HIGHLIGHTS_PY` | `~/.local/libexec/kindle-clippings-sync/kcs_highlights.py` | o extrator |
+| `KCS_KFXLIB_PATH` | `~/.local/libexec/kindle-clippings-sync/kfxlib` | pasta que contém o pacote `kfxlib` |
+| `KCS_CACHE_DIR` | `~/Library/Caches/kindle-clippings-sync` | cache dos `.kfx` (fora do cofre) |
+| `KCS_HIGHLIGHTS_TIMEOUT` | `300` | tempo máximo da extração do texto |
 | `KCS_LOG` | `~/Library/Logs/kindle-clippings-sync.log` | arquivo de log |
 | `KCS_STATE_DIR` | `~/Library/Application Support/kindle-clippings-sync` | hash, sessão USB e lock |
 
@@ -238,7 +271,8 @@ Notas:
 
 - O helper do evento de IOKit é compilado no Mac; se as Command Line Tools não estiverem instaladas, o gatilho fica só no `StartInterval` (até 2 min de atraso).
 - Se houver dois Kindles conectados ao mesmo tempo, só o primeiro é sincronizado.
-- A partir do firmware 5.19.6 (agosto de 2026) o Kindle deixou de acrescentar destaques novos ao `My Clippings.txt` em vários modelos (relatos de Colorsoft, Scribe e, aqui, do Paperwhite 5.20.1). Os destaques continuam no aparelho, em `/system/ksdk/.annotations/<conta>/ksdk_annotation_v1.db` (SQLite, só posições, sem texto). Este projeto ainda sincroniza só o `My Clippings.txt`.
+- A partir do firmware 5.19.6 (agosto de 2026) o Kindle deixou de acrescentar destaques novos ao `My Clippings.txt` em vários modelos (relatos de Colorsoft, Scribe e, aqui, do Paperwhite 5.20.1). Os destaques continuam no aparelho, em `/system/ksdk/.annotations/<conta>/ksdk_annotation_v1.db` (SQLite, só posições, sem texto); veja "Destaques do banco de anotações".
+- Notas de destaques: livros com DRM (KFX criptografado) e livros que estão só na nuvem saem só com posições. "Posição" é a do Kindle (locations do kfxlib), que pode diferir em 1 da mostrada no aparelho. A primeira coleta baixa o `.kfx` de cada livro com destaques (alguns MB cada); depois só os que mudaram. O nome da nota vem do título do livro e pode coincidir com outra nota do cofre; renomeie no Obsidian se precisar (a nota é reescrita com o mesmo nome só quando o conteúdo muda).
 - O download via MTP lê a lista de arquivos do aparelho inteiro; com bibliotecas grandes pode levar alguns segundos.
 
 ## Testes
@@ -253,10 +287,11 @@ Os testes rodam em Linux ou macOS com um `/Volumes`, um cofre e um `HOME` falsos
 - `/Volumes`: ausência de Kindle, pendrive sem marcador, cópia byte a byte com BOM e CRLF, backup, execução sem mudança, nova entrada, lock, `--force`, config por arquivo, cofre inexistente;
 - MTP: uma única sessão por sincronização, disparos simultâneos abrindo uma sessão só, SIGTERM ignorado herdado (timeout continua funcionando), reserva com as ferramentas `mtp-*`, Kindle ausente no `ioreg` (nada de MTP é chamado), escolha da cópia em `documents` entre iscas em outras pastas, reexecução na mesma conexão sem abrir o MTP, reconexão, aparelho ocupado (com e sem recuperação), `No devices.` no `mtp-getfile`, comando travado (timeout), aparelho sem `My Clippings.txt`, libmtp ausente, ferramentas achadas pelo PATH, prioridade do MTP sobre `/Volumes`;
 - `kcs-mtp-pull` em C, compilado contra um libmtp falso (`tests/stub-libmtp/`): modo padrão, `--list`, `--get`, `--get-dir`, `--get-id`, várias operações numa sessão só, reset desligado, erros e códigos de saída;
+- destaques: `--list-to`, `--get-match` (sem o `anonymous`) e `--then` na mesma sessão, cache dos livros fora do cofre, texto pelo kfxlib falso (`tests/fakes/pylib/`), capítulos, notas, imagem, livro com DRM e livro ausente (só posições), backup do banco, segunda execução sem baixar nem reescrever, destaque alterado e apagado, livro alterado no aparelho, sem kfxlib, `KCS_HIGHLIGHTS=0`; banco e livros falsos gerados por `tests/fixtures/make-kindle-hl.py`;
 - instalador: plist com e sem helper (`LaunchEvents`, `idVendor`, `idProduct`, `StartInterval`), `--product-id any`, `--interval`, `--no-iokit`, `--install-deps`, reinstalação preservando a config, execução ponta a ponta pelo helper e desinstalação.
 
 `tests/lint.sh` roda o `shellcheck` e valida os plists gerados (`plutil`, `xmllint` ou `python3` com o DTD da Apple, o que existir).
 
 ## Licença
 
-MIT. Veja [LICENSE](LICENSE).
+MIT. Veja [LICENSE](LICENSE). O kfxlib, baixado à parte pelo `install.sh`, é GPL v3 e não faz parte deste repositório; `tests/fakes/pylib/kfxlib` é um substituto falso, escrito para os testes.

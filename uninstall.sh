@@ -3,7 +3,8 @@
 # Nunca apaga nada do cofre do Obsidian (copias, backups e a nota ficam).
 #
 # Uso: ./uninstall.sh [--purge] [--prefix DIR]
-#   --purge       tambem apaga config, estado interno e log
+#   --purge       tambem apaga config, estado interno, cache de livros e log
+#                 (o venv e o kfxlib, em ~/.local/libexec, saem sempre)
 #   --prefix DIR  onde o script foi instalado (padrao: ~/.local/bin)
 
 set -eu
@@ -17,7 +18,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --purge) PURGE=1; shift ;;
     --prefix) PREFIX="${2:?--prefix precisa de um diretorio}"; shift 2 ;;
-    -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opcao desconhecida: $1" >&2; exit 2 ;;
   esac
 done
@@ -35,7 +36,8 @@ rm -rf "$HOME/.local/libexec/kindle-clippings-sync"
 if [ "$PURGE" = 1 ]; then
   echo "==> Removendo config, estado e log"
   rm -rf "$HOME/.config/kindle-clippings-sync" \
-    "$HOME/Library/Application Support/kindle-clippings-sync"
+    "$HOME/Library/Application Support/kindle-clippings-sync" \
+    "$HOME/Library/Caches/kindle-clippings-sync"
   rm -f "$HOME/Library/Logs/kindle-clippings-sync.log" "$HOME/Library/Logs/kindle-clippings-sync.log.1"
 fi
 

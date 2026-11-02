@@ -14,6 +14,8 @@
 #   --no-iokit             nao usa o gatilho de conexao USB (so StartInterval/StartOnMount)
 #   --helper-bin CAMINHO   usa um kcs-iokit-trigger ja compilado em vez de compilar
 #   --pull-bin CAMINHO     usa um kcs-mtp-pull ja compilado em vez de compilar
+#   --no-highlights        nao instala o extrator de destaques (python + kfxlib) e
+#                          desliga a coleta do banco de anotacoes (KCS_HIGHLIGHTS=0)
 #   --run-now              depois de instalar, dispara o job pelo launchd e mostra o log
 #   --test                 depois de instalar, roda o script em primeiro plano (--now)
 #   --no-load              nao carrega o job no launchd
@@ -36,13 +38,21 @@ LOG_FILE="$HOME/Library/Logs/kindle-clippings-sync.log"
 LIBEXEC="$HOME/.local/libexec/kindle-clippings-sync"
 HELPER="$LIBEXEC/kcs-iokit-trigger"
 PULL="$LIBEXEC/kcs-mtp-pull"
+VENV="$LIBEXEC/venv"
+KFXLIB_DIR="$LIBEXEC/kfxlib"
+# kfxlib (GPL v3, de John Howell / KFX Input) NAO vem neste repositorio: e baixado na
+# instalacao, de um commit fixo do kindle.koplugin, que traz uma copia em python/kfxlib.
+KFXLIB_REPO="kaikozlov/kindle.koplugin"
+KFXLIB_COMMIT="501488fd99ace3ea143a8693b9fa7c6421101d51"
+PY_DEPS="pypdf pillow lxml beautifulsoup4"
 
 # Chaves gravadas na config (valores existentes sao preservados em reinstalacoes).
 CONFIG_KEYS="KCS_VAULT KCS_DEST_SUBDIR KCS_SOURCE KCS_NOTIFY KCS_MAX_BACKUPS \
 KCS_USB_VENDOR_ID KCS_USB_PRODUCT_ID KCS_START_INTERVAL KCS_IOKIT_TRIGGER \
 KCS_MTP_DELAY KCS_MTP_RETRIES KCS_MTP_RETRY_INTERVAL KCS_MTP_TIMEOUT \
 KCS_MTP_RESYNC_SECONDS KCS_MTP_KILL_PTPCAMERAD \
-KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_REQUIRE_MARKER"
+KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_REQUIRE_MARKER \
+KCS_HIGHLIGHTS KCS_PYTHON"
 
 default_for() {
   case "$1" in
@@ -65,6 +75,8 @@ default_for() {
     KCS_RETRIES) echo 3 ;;
     KCS_RETRY_INTERVAL) echo 5 ;;
     KCS_REQUIRE_MARKER) echo 1 ;;
+    KCS_HIGHLIGHTS) echo auto ;;
+    KCS_PYTHON) echo "$VENV/bin/python" ;;
   esac
 }
 
@@ -73,6 +85,7 @@ OPT_SUBDIR=""
 OPT_PRODUCT=""
 OPT_INTERVAL=""
 OPT_IOKIT=""
+OPT_HL=""
 HELPER_BIN=""
 PULL_BIN=""
 PREFIX="${KCS_PREFIX:-$HOME/.local/bin}"
@@ -81,7 +94,7 @@ RUN_NOW=0
 RUN_TEST=0
 LOAD=1
 
-usage() { sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -94,6 +107,7 @@ while [ $# -gt 0 ]; do
     --no-iokit) OPT_IOKIT=0; shift ;;
     --helper-bin) HELPER_BIN="${2:?--helper-bin precisa de um caminho}"; shift 2 ;;
     --pull-bin) PULL_BIN="${2:?--pull-bin precisa de um caminho}"; shift 2 ;;
+    --no-highlights) OPT_HL=0; shift ;;
     --run-now) RUN_NOW=1; shift ;;
     --test) RUN_TEST=1; shift ;;
     --no-load) LOAD=0; shift ;;
@@ -120,6 +134,7 @@ done
 [ -n "$OPT_PRODUCT" ] && KCS_USB_PRODUCT_ID="$OPT_PRODUCT"
 [ -n "$OPT_INTERVAL" ] && KCS_START_INTERVAL="$OPT_INTERVAL"
 [ -n "$OPT_IOKIT" ] && KCS_IOKIT_TRIGGER="$OPT_IOKIT"
+[ -n "$OPT_HL" ] && KCS_HIGHLIGHTS="$OPT_HL"
 for k in $CONFIG_KEYS; do
   eval "__cur=\"\${$k-}\""
   # shellcheck disable=SC2154
@@ -246,6 +261,91 @@ elif can_build && MTP_FLAGS="$(libmtp_flags)"; then
   fi
 else
   echo "==> AVISO: kcs-mtp-pull nao compilado (precisa do libmtp e das Command Line Tools)."
+fi
+
+# --- destaques: extrator, python e kfxlib ---------------------------------
+# Firmware 5.19.6+ nao escreve mais o My Clippings.txt; os destaques ficam num banco
+# SQLite no Kindle. O extrator (lib/kcs_highlights.py, MIT) le o banco e, com o
+# kfxlib, tira o texto do .kfx. Nada disto mexe em configuracoes do sistema: tudo
+# fica em $LIBEXEC (venv proprio, pip so dentro dele).
+py_ok() {
+  "$1" -c 'import sys, sqlite3, venv; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1
+}
+find_python() {
+  local c
+  if [ -n "${KCS_PY_BASE:-}" ]; then py_ok "$KCS_PY_BASE" && { echo "$KCS_PY_BASE"; return 0; }; return 1; fi
+  # Homebrew primeiro, depois o python3 das Command Line Tools (/usr/bin).
+  for c in ${KCS_PY_CANDIDATES-/opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3}; do
+    [ -x "$c" ] && py_ok "$c" && { echo "$c"; return 0; }
+  done
+  return 1
+}
+fetch_kfxlib() {
+  local t src
+  t="$(mktemp -d "${TMPDIR:-/tmp}/kcs-kfxlib.XXXXXX")"
+  if [ -n "${KCS_KFXLIB_SRC:-}" ]; then
+    src="$KCS_KFXLIB_SRC" # testes: pasta que contem o pacote kfxlib
+  else
+    if ! curl -fsSL --retry 2 -o "$t/k.tgz" "https://codeload.github.com/$KFXLIB_REPO/tar.gz/$KFXLIB_COMMIT" ||
+      ! tar -xzf "$t/k.tgz" -C "$t" "kindle.koplugin-$KFXLIB_COMMIT/python/kfxlib"; then
+      rm -rf "$t"; return 1
+    fi
+    src="$t/kindle.koplugin-$KFXLIB_COMMIT/python"
+  fi
+  [ -f "$src/kfxlib/__init__.py" ] || { rm -rf "$t"; return 1; }
+  rm -rf "$KFXLIB_DIR.tmp.$$" && mkdir -p "$KFXLIB_DIR.tmp.$$" &&
+    cp -R "$src/kfxlib" "$KFXLIB_DIR.tmp.$$/kfxlib" &&
+    find "$KFXLIB_DIR.tmp.$$" -name __pycache__ -type d -prune -exec rm -rf {} + &&
+    {
+      echo "kfxlib (GPL v3) baixado pelo install.sh do kindle-clippings-sync em $(date '+%Y-%m-%d %H:%M:%S')."
+      echo "Nao faz parte do kindle-clippings-sync (MIT); e usado como programa separado."
+      echo "Origem: https://github.com/$KFXLIB_REPO/tree/$KFXLIB_COMMIT/python/kfxlib"
+      echo "Commit: $KFXLIB_COMMIT"
+      echo "Autor original: John Howell (KFX Input, https://www.mobileread.com/forums/showthread.php?t=291290)"
+      echo "Licenca: GNU General Public License v3.0"
+    } >"$KFXLIB_DIR.tmp.$$/SOURCE.txt"
+  rm -rf "$t" "$KFXLIB_DIR" && mv "$KFXLIB_DIR.tmp.$$" "$KFXLIB_DIR"
+}
+if [ "$KCS_HIGHLIGHTS" = 0 ]; then
+  echo "==> Destaques do banco de anotacoes desligados (KCS_HIGHLIGHTS=0)"
+else
+  echo "==> Instalando o extrator de destaques em $LIBEXEC"
+  cp "$REPO_DIR/lib/kcs_highlights.py" "$LIBEXEC/kcs_highlights.py.tmp.$$"
+  mv -f "$LIBEXEC/kcs_highlights.py.tmp.$$" "$LIBEXEC/kcs_highlights.py"
+  if BASE_PY="$(find_python)"; then
+    echo "    python: $BASE_PY ($("$BASE_PY" -c 'import platform; print(platform.python_version())'))"
+    if [ ! -x "$VENV/bin/python" ] || ! "$VENV/bin/python" -c 'import sys' >/dev/null 2>&1 ||
+      [ "$(cat "$VENV/.kcs-base" 2>/dev/null)" != "$BASE_PY" ]; then
+      rm -rf "$VENV"
+      if "$BASE_PY" -m venv "$VENV"; then echo "$BASE_PY" >"$VENV/.kcs-base"; else
+        echo "    AVISO: falha ao criar o venv em $VENV"; rm -rf "$VENV"; fi
+    fi
+    if [ -x "$VENV/bin/python" ] && [ "${KCS_PY_DEPS_SKIP:-0}" != 1 ]; then
+      echo "    pip (so no venv): $PY_DEPS"
+      # shellcheck disable=SC2086 # PY_DEPS sao varios pacotes
+      "$VENV/bin/python" -m pip install --disable-pip-version-check -q --upgrade $PY_DEPS ||
+        echo "    AVISO: pip falhou; livros com imagens ou PDF podem nao abrir"
+    fi
+    if [ ! -x "$VENV/bin/python" ] && [ "$KCS_PYTHON" = "$(default_for KCS_PYTHON)" ]; then
+      KCS_PYTHON="$BASE_PY"
+    fi
+  else
+    echo "    AVISO: nao achei python3 >= 3.9 (instale com: brew install python, ou xcode-select --install)."
+    echo "    Sem python os destaques do banco nao sao coletados; o My Clippings.txt continua igual."
+  fi
+  if [ "$(sed -n 's/^Commit: //p' "$KFXLIB_DIR/SOURCE.txt" 2>/dev/null)" = "$KFXLIB_COMMIT" ] &&
+    [ -z "${KCS_KFXLIB_SRC:-}" ]; then
+    echo "    kfxlib: ja instalado ($KFXLIB_COMMIT)"
+  elif fetch_kfxlib; then
+    echo "    kfxlib (GPL v3) baixado em $KFXLIB_DIR (commit $KFXLIB_COMMIT; veja SOURCE.txt)"
+  else
+    echo "    AVISO: nao consegui baixar o kfxlib; as notas de destaques saem so com posicoes"
+  fi
+  if [ -x "$KCS_PYTHON" ] && "$KCS_PYTHON" -c 'import sys; sys.path.insert(0, sys.argv[1]); import kfxlib' "$KFXLIB_DIR" >/dev/null 2>&1; then
+    echo "    ok: kfxlib importa com $KCS_PYTHON"
+  else
+    echo "    AVISO: kfxlib nao importa com $KCS_PYTHON; as notas saem so com posicoes"
+  fi
 fi
 
 # --- config ----------------------------------------------------------------
@@ -389,4 +489,5 @@ echo "Pronto. Cofre: $KCS_VAULT"
 echo "Destino: $KCS_VAULT/$KCS_DEST_SUBDIR"
 echo "Gatilho USB (IOKit): $([ "$USE_HELPER" = 1 ] && echo "ligado (idVendor $KCS_USB_VENDOR_ID, idProduct $KCS_USB_PRODUCT_ID)" || echo desligado)"
 echo "StartInterval: ${KCS_START_INTERVAL}s"
+echo "Destaques do banco (firmware novo): $([ "$KCS_HIGHLIGHTS" = 0 ] && echo desligados || echo "$KCS_HIGHLIGHTS, em $KCS_DEST_SUBDIR/Destaques")"
 echo "Log: $LOG_FILE"

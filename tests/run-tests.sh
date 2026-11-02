@@ -409,6 +409,81 @@ echo none >"$FAKE_DIR/ioreg-mode"
 
 echo
 echo "== Instalador =="
+echo "M15) Destaques do banco de anotações do Kindle (firmware 5.19.6+)"
+PY3="$(command -v python3 || true)"
+if [ -z "$PY3" ] || ! "$PY3" -c 'import sqlite3' 2>/dev/null; then
+  echo "  (pulado: sem python3 com sqlite3)"
+else
+  HDEST="$TMP/hl-dest"; HSTATE="$TMP/hl-state"; HCACHE="$TMP/hl-cache"
+  HDEV="$FAKE_DIR/hl-dev"; HNOTES="$HDEST/Destaques"
+  NOTE_A="$HNOTES/Livro Teste.md"
+  AAA="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  mkhl() { rm -rf "$HDEV"; "$PY3" "$REPO_DIR/tests/fixtures/make-kindle-hl.py" "$HDEV" "$FAKE_DIR/hl-tree" "$1"; }
+  hlrun() {
+    env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$HDEST" KCS_STATE_DIR="$HSTATE" KCS_CACHE_DIR="$HCACHE" \
+      KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_PULL="" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
+      KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS="${HL:-1}" KCS_PYTHON="$PY3" \
+      KCS_HIGHLIGHTS_PY="$REPO_DIR/lib/kcs_highlights.py" KCS_KFXLIB_PATH="${KFX-$FAKES/pylib}" \
+      bash "$SCRIPT" --now </dev/null >"$TMP/stdout" 2>"$TMP/stderr"
+  }
+  dbbackups() { find "$HDEST/backups" -maxdepth 1 -name 'ksdk_annotation_v1 *.db' 2>/dev/null | wc -l | tr -d ' '; }
+  echo kindle >"$FAKE_DIR/ioreg-mode"; echo 7777 >"$FAKE_DIR/session"; rm -f "$FAKE_DIR/busy" "$FAKE_DIR/nodevice"
+  mkhl base
+  devsum="$(cd "$HDEV" && find . -type f -exec cksum {} + | sort)"
+  : >"$FAKE_DIR/calls"; : >"$FAKE_DIR/calls.get"; : >"$LOG"
+  hlrun; rc=$?
+  check "sai com 0 e sincroniza o My Clippings.txt como antes" bash -c '[ "$1" -eq 0 ] && cmp -s "$2" "$3"' _ "$rc" "$MDEV/clippings-real.txt" "$HDEST/My Clippings.txt"
+  check "uma sessao so, com --list-to, --get-match (só contas amzn1.account) e --then" \
+    bash -c '[ "$(grep -c "^kcs-mtp-pull" "$1")" -eq 1 ] && grep -q -- "--list-to .* --get-match /system/ksdk/.annotations/amzn1.account.\*/ksdk_annotation_v1.db .* --then " "$1"' _ "$FAKE_DIR/calls"
+  check "baixa só os livros .kfx com destaques que estão no aparelho (2)" [ "$(wc -l <"$FAKE_DIR/calls.get" | tr -d ' ')" -eq 2 ]
+  check "livro fica no cache, fora do cofre" bash -c '[ -f "$1/books/'"$AAA"'.kfx" ] && [ -f "$1/books/'"$AAA"'.meta" ] && ! find "$2" -name "*.kfx" | grep -q .' _ "$HCACHE" "$HDEST"
+  check "uma nota por livro com destaques (3)" [ "$(find "$HNOTES" -name '*.md' | wc -l | tr -d ' ')" -eq 3 ]
+  check "título sem o '(Autor)' e autor no frontmatter" bash -c 'grep -q "^titulo: \"Livro Teste\"$" "$1" && grep -q "^autor: \"Autora Fulana\"$" "$1"' _ "$NOTE_A"
+  check "frontmatter: 3 destaques, 1 nota, texto verificado" bash -c 'grep -q "^destaques: 3$" "$1" && grep -q "^notas: 1$" "$1" && grep -q "^texto_verificado: true$" "$1"' _ "$NOTE_A"
+  check "texto recuperado, aspas retas, sem travessão nem chamada de nota" \
+    grep -qx '> Primeiro parágrafo "com" - nota.' "$NOTE_A"
+  check "capítulos pelo sumário do livro" bash -c 'grep -qx "### Capítulo 1" "$1" && grep -qx "### Capítulo 2" "$1"' _ "$NOTE_A"
+  check "posição e data em linha pequena" grep -q '^> <small>Posição 1-2 | ' "$NOTE_A"
+  check "nota do Kindle junto do destaque, com aspas retas" grep -qx '\*\*Nota no Kindle:\*\* minha "nota"' "$NOTE_A"
+  check "destaque sobre imagem indicado" grep -q 'destaque sobre uma imagem' "$NOTE_A"
+  check "anonymous ignorado (sem o destaque 99)" bash -c '! grep -rq "highlight-99" "$1" && ! grep -q "Primeiro p\$" "$2"' _ "$HSTATE/highlights" "$NOTE_A"
+  check "livro com DRM: só posições, com o motivo" bash -c 'f="$(grep -l "^kindle_id: DDDD" "$1"/*.md)" && grep -q "^texto_verificado: false$" "$f" && grep -q "protegido" "$f" && grep -q "posição no livro 5-9" "$f"' _ "$HNOTES"
+  check "livro ausente do aparelho: só posições" bash -c 'f="$(grep -l "^kindle_id: MMMM" "$1"/*.md)" && grep -q "livro não encontrado no Kindle" "$f"' _ "$HNOTES"
+  check "cópia do banco em backups/" [ "$(dbbackups)" -eq 1 ]
+  check "log resume os destaques" grep -q 'destaques: 3 livro(s), 6 anotações (6 novas), 3 nota(s) atualizada(s)' "$LOG"
+  check "nada escrito no aparelho" [ "$(cd "$HDEV" && find . -type f -exec cksum {} + | sort)" = "$devsum" ]
+
+  mtime_a="$(ls -l --time-style=+%s "$NOTE_A" 2>/dev/null || stat -f %m "$NOTE_A")"
+  sleep 1; : >"$FAKE_DIR/calls.get"; : >"$LOG"
+  hlrun; rc=$?
+  check "2a execução sem mudanças: 0 livros baixados de novo" bash -c '[ "$1" -eq 0 ] && [ ! -s "$2" ]' _ "$rc" "$FAKE_DIR/calls.get"
+  check "2a execução: nota não reescrita, sem novo backup do banco" bash -c '[ "$(ls -l --time-style=+%s "$1" 2>/dev/null || stat -f %m "$1")" = "$2" ] && [ "$3" -eq 1 ]' _ "$NOTE_A" "$mtime_a" "$(dbbackups)"
+  check "2a execução: log com 0 novas e 0 notas atualizadas" grep -q '(0 novas), 0 nota(s) atualizada(s)' "$LOG"
+
+  mkhl edit; : >"$LOG"
+  hlrun
+  check "destaque alterado no Kindle (mesmo id, nova data): nota atualizada" bash -c 'grep -q "^> <small>Posição 3-4 | " "$1" && [ "$(grep -c "<small>Posição 3" "$1")" -eq 1 ]' _ "$NOTE_A"
+  check "banco mudou: novo backup" [ "$(dbbackups)" -eq 2 ]
+
+  mkhl delete
+  hlrun
+  check "destaque apagado no Kindle: mantido e marcado" bash -c 'grep -q "removido no Kindle" "$1" && grep -q "^removidos_no_kindle: 1$" "$1" && grep -q "^destaques: 2$" "$1"' _ "$NOTE_A"
+
+  mkhl newbook; : >"$FAKE_DIR/calls.get"
+  hlrun
+  check "livro mudou no aparelho (data): baixado de novo" grep -q 'Livro Teste' "$FAKE_DIR/calls.get"
+  check "texto novo do livro na nota" grep -q 'REVISADO' "$NOTE_A"
+
+  rm -rf "$HSTATE/highlights" "$HNOTES"
+  KFX="$TMP/sem-kfxlib" hlrun
+  check "sem kfxlib: notas só com posições e motivo" bash -c 'grep -q "kfxlib não instalado" "$1" && grep -q "^texto_verificado: false$" "$1"' _ "$NOTE_A"
+
+  : >"$FAKE_DIR/calls"
+  HL=0 hlrun
+  check "KCS_HIGHLIGHTS=0: sessão sem extras" bash -c '! grep -q -- "--then" "$1"' _ "$FAKE_DIR/calls"
+  rm -rf "$HDEV" "$FAKE_DIR/hl-tree"
+fi
+
 echo "12) install.sh / uninstall.sh (HOME falso, sem launchctl, sem libmtp, sem helper)"
 IHOME="$TMP/ihome"
 mkdir -p "$IHOME"
@@ -416,7 +491,8 @@ IVAULT="$IHOME/Library/Mobile Documents/iCloud~md~obsidian/Documents"
 IPATH="$TMP/ibin:/usr/bin:/bin" # PATH sem mtp-* e sem brew
 mkdir -p "$TMP/ibin"
 # KCS_TOOL_DIRS vazio: nao procura em /opt/homebrew/bin nem /usr/local/bin (o Mac real pode ter libmtp).
-ienv() { env -u KCS_VAULT -u KCS_DEST_SUBDIR -u KCS_CONFIG HOME="$IHOME" PATH="$IPATH" KCS_TOOL_DIRS="" KCS_SKIP_LAUNCHCTL=1 "$@"; }
+ienv() { env -u KCS_VAULT -u KCS_DEST_SUBDIR -u KCS_CONFIG HOME="$IHOME" PATH="$IPATH" KCS_TOOL_DIRS="" KCS_SKIP_LAUNCHCTL=1 \
+  KCS_PY_CANDIDATES="" KCS_KFXLIB_SRC="$FAKES/pylib" KCS_PY_DEPS_SKIP=1 "$@"; } # sem rede, sem python do sistema
 IPLIST="$IHOME/Library/LaunchAgents/digital.gabriel.kindle-clippings-sync.plist"
 ICFG="$IHOME/.config/kindle-clippings-sync/config.env"
 plist_ok() {
@@ -448,6 +524,13 @@ fi
 check "config preserva o caminho com espacos e til" [ "$(cfg KCS_VAULT)" = "$IVAULT" ]
 check "config tem pasta padrao" [ "$(cfg KCS_DEST_SUBDIR)" = "05 Conhecimento/Leituras/_Kindle" ]
 check "config tem o produto USB padrao (0x9981)" [ "$(cfg KCS_USB_PRODUCT_ID)" = 39297 ]
+ILIBEXEC="$IHOME/.local/libexec/kindle-clippings-sync"
+check "extrator de destaques instalado em libexec" [ -f "$ILIBEXEC/kcs_highlights.py" ]
+check "kfxlib instalado fora do repo, com SOURCE.txt (commit fixo, GPL v3)" \
+  bash -c '[ -f "$1/kfxlib/kfxlib/__init__.py" ] && grep -q "^Commit: [0-9a-f]\{40\}$" "$1/kfxlib/SOURCE.txt" && grep -q "GNU General Public License v3.0" "$1/kfxlib/SOURCE.txt"' _ "$ILIBEXEC"
+check "sem python3: avisa e segue" grep -q 'nao achei python3 >= 3.9' "$TMP/install.out"
+check "config: KCS_HIGHLIGHTS=auto e KCS_PYTHON no venv" bash -c '[ "$1" = auto ] && [ "$2" = "$3/venv/bin/python" ]' _ "$(cfg KCS_HIGHLIGHTS)" "$(cfg KCS_PYTHON)" "$ILIBEXEC"
+check "nada do kfxlib (GPL) dentro do repositorio" bash -c '! git -C "$1" ls-files | grep -v "^tests/fakes/pylib/" | grep -qi kfxlib/' _ "$REPO_DIR"
 
 echo "13) Com helper de IOKit (--helper-bin) e libmtp no PATH"
 mkdir -p "$TMP/ibrew"
@@ -498,6 +581,27 @@ check "rodou brew install libmtp" grep -q '^brew install libmtp$' "$FAKE_DIR/cal
 ienv bash "$REPO_DIR/install.sh" --install-deps >/dev/null 2>&1
 check "segunda vez nao reinstala" [ "$(grep -c '^brew install' "$FAKE_DIR/calls")" -eq 1 ]
 
+echo "14b) Extrator de destaques: venv proprio e --no-highlights"
+PY3I="$(command -v python3 || true)"
+if [ -n "$PY3I" ] && "$PY3I" -m venv --help >/dev/null 2>&1; then
+  ienv KCS_PY_BASE="$PY3I" bash "$REPO_DIR/install.sh" --pull-bin "$FAKES/kcs-mtp-pull" >"$TMP/install.out" 2>&1; rc=$?
+  if grep -q 'falha ao criar o venv' "$TMP/install.out"; then
+    echo "  (venv indisponivel neste python; checagens do venv puladas)"
+  else
+    check "cria o venv em libexec com o python escolhido" bash -c '[ "$1" -eq 0 ] && [ -x "$2/venv/bin/python" ] && [ "$(cat "$2/venv/.kcs-base")" = "$3" ]' _ "$rc" "$ILIBEXEC" "$PY3I"
+    check "kfxlib importa com o python do venv" grep -q 'ok: kfxlib importa' "$TMP/install.out"
+    check "KCS_PY_DEPS_SKIP=1: sem pip" bash -c '! grep -q "pip (so no venv)" "$1"' _ "$TMP/install.out"
+    ienv KCS_PY_BASE="$PY3I" bash "$REPO_DIR/install.sh" --pull-bin "$FAKES/kcs-mtp-pull" >"$TMP/install.out" 2>&1
+    check "reinstalar mantem o venv" grep -q 'python: ' "$TMP/install.out"
+  fi
+fi
+ienv bash "$REPO_DIR/install.sh" --no-highlights >"$TMP/install.out" 2>&1; rc=$?
+check "--no-highlights grava KCS_HIGHLIGHTS=0" bash -c '[ "$1" -eq 0 ] && [ "$2" = 0 ] && grep -q "desligados" "$3"' _ "$rc" "$(cfg KCS_HIGHLIGHTS)" "$TMP/install.out"
+ienv bash "$REPO_DIR/install.sh" >/dev/null 2>&1
+check "reinstalar sem opcoes preserva KCS_HIGHLIGHTS=0" [ "$(cfg KCS_HIGHLIGHTS)" = 0 ]
+ienv KCS_HIGHLIGHTS=auto bash "$REPO_DIR/install.sh" >/dev/null 2>&1
+check "KCS_HIGHLIGHTS=auto no ambiente religa" [ "$(cfg KCS_HIGHLIGHTS)" = auto ]
+
 echo "15) Script instalado + helper + config gerada, ponta a ponta"
 mkdir -p "$IVAULT"
 echo kindle >"$FAKE_DIR/ioreg-mode"; echo 4242 >"$FAKE_DIR/session"
@@ -514,10 +618,14 @@ check "uninstall.sh sai com 0" [ "$rc" -eq 0 ]
 check "plist removido" [ ! -e "$IPLIST" ]
 check "script removido" [ ! -e "$IHOME/.local/bin/kindle-clippings-sync" ]
 check "helper removido" [ ! -e "$IHELPER" ]
+check "venv e kfxlib removidos" bash -c '[ ! -e "$1/venv" ] && [ ! -e "$1/kfxlib" ]' _ "$ILIBEXEC"
+mkdir -p "$IHOME/Library/Caches/kindle-clippings-sync/books"
+check "cache de livros mantido sem --purge" [ -d "$IHOME/Library/Caches/kindle-clippings-sync" ]
 check "config mantida sem --purge" [ -f "$ICFG" ]
 check "cofre intacto" [ -f "$IVAULT/05 Conhecimento/Leituras/_Kindle/My Clippings.txt" ]
 ienv bash "$REPO_DIR/uninstall.sh" --purge >/dev/null 2>&1
 check "--purge remove a config" [ ! -e "$ICFG" ]
+check "--purge remove o cache de livros" [ ! -e "$IHOME/Library/Caches/kindle-clippings-sync" ]
 
 echo "17) kcs-mtp-pull (C) contra um libmtp falso (tests/stub-libmtp)"
 STUB="$REPO_DIR/tests/stub-libmtp"
@@ -539,7 +647,7 @@ else
   check "modo padrao: reset desligado ao abrir (0x08008106)" grep -q '^open 0x08008106$' "$KLOG"
 
   : >"$KLOG"; kmp --list >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
-  check "--list sai com 0 e lista os 14 itens" bash -c '[ "$1" -eq 0 ] && [ "$(wc -l <"$2" | tr -d " ")" -eq 14 ]' _ "$rc" "$TMP/kmp.out"
+  check "--list sai com 0 e lista os 20 itens" bash -c '[ "$1" -eq 0 ] && [ "$(wc -l <"$2" | tr -d " ")" -eq 20 ]' _ "$rc" "$TMP/kmp.out"
   check "--list: tipo, id, pai, storage, bytes, mtime, caminho completo" \
     grep -qx "$(printf 'f\t24\t23\t65537\t21\t1790000024\t%s.sdr/Livro_ID1abc.yjr' "$BOOK")" "$TMP/kmp.out"
   check "--list: pastas com d e pai 0 na raiz" grep -qx "$(printf 'd\t2\t0\t65537\t0\t1790000002\t/system')" "$TMP/kmp.out"
@@ -553,6 +661,35 @@ else
   check "--get-dir baixa so os arquivos diretos da pasta" bash -c '[ -f "$1/Livro_ID1abc.yjr" ] && [ -f "$1/Livro_ID1abc.yjf" ] && [ ! -e "$1/inner.bin" ] && [ "$(ls "$1" | wc -l | tr -d " ")" -eq 2 ]' _ "$KD/sdr"
   check "--get-id baixa pelo id" bash -c 'head -c 7 "$1" | grep -q "item 30"' _ "$KD/v.txt"
   check "imprime GOT por arquivo" [ "$(grep -c '^GOT ' "$TMP/kmp.out")" -eq 4 ]
+
+  # Sessao completa da sincronizacao: clippings + arvore + bancos + o que o --then pedir.
+  : >"$KLOG"; rm -rf "$KD"; mkdir -p "$KD"
+  cat >"$KD/sel.sh" <<'SEL'
+#!/bin/sh
+# seletor falso: confere a arvore e pede o livro e um caminho inexistente
+grep -q "Livro_ID1abc.yjr" "$KCS_TREE" || exit 5
+printf 'GET\t%s\t%s\n' "/documents/Downloads/Items01/Livro Comço_ID1.kfx" "$KCS_OUT/livros/ID1.kfx.new"
+printf 'ruido que deve ser ignorado\n'
+SEL
+  chmod +x "$KD/sel.sh"
+  KCS_OUT="$KD" kmp "$KD/clip.txt" --list-to "$KD/tree.tsv" \
+    --get-match '/system/ksdk/.annotations/amzn1.account.*/ksdk_annotation_v1.db' "$KD/dev" \
+    --then "$KD/sel.sh" >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
+  check "sincronizacao completa: sai com 0 e baixa o My Clippings.txt" bash -c '[ "$1" -eq 0 ] && grep -q "^OK 10 40 " "$2" && [ -f "$3" ]' _ "$rc" "$TMP/kmp.out" "$KD/clip.txt"
+  check "--list-to grava a arvore em arquivo, nao no stdout" bash -c '[ "$(wc -l <"$1" | tr -d " ")" -eq 20 ] && ! grep -q "^f	" "$2"' _ "$KD/tree.tsv" "$TMP/kmp.out"
+  check "--get-match baixa o banco da conta e pula o anonymous" bash -c '[ -f "$1/system/ksdk/.annotations/amzn1.account.TESTE/ksdk_annotation_v1.db" ] && [ ! -e "$1/system/ksdk/.annotations/anonymous" ]' _ "$KD/dev"
+  check "--then baixa o que o programa pediu (criando a pasta)" bash -c 'head -c 7 "$1" | grep -q "item 22"' _ "$KD/livros/ID1.kfx.new"
+  check "--then: tudo numa sessao (1 open, 1 release)" bash -c '[ "$(grep -c "^open" "$1")" -eq 1 ] && [ "$(grep -c "^release" "$1")" -eq 1 ]' _ "$KLOG"
+  cat >"$KD/sel2.sh" <<'SEL'
+#!/bin/sh
+printf 'GET\t/nao/existe\t/tmp/x\n'
+exit 3
+SEL
+  chmod +x "$KD/sel2.sh"
+  kmp "$KD/clip2.txt" --list-to "$KD/tree2.tsv" --then "$KD/sel2.sh" >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
+  check "erro no --then nao muda o codigo do My Clippings.txt (0) e aparece como ERR" bash -c '[ "$1" -eq 0 ] && grep -q "^ERR nao encontrado: /nao/existe" "$2" && grep -q "^ERR then: " "$2"' _ "$rc" "$TMP/kmp.err"
+  kmp --then >/dev/null 2>&1; rc=$?
+  check "--then sem argumento: uso (64)" [ "$rc" -eq 64 ]
 
   kmp --get /nao/existe "$KD/x" >"$TMP/kmp.out" 2>"$TMP/kmp.err"; rc=$?
   check "--get de caminho inexistente: sai com 1 e ERR" bash -c '[ "$1" -eq 1 ] && grep -q "^ERR nao encontrado: /nao/existe" "$2"' _ "$rc" "$TMP/kmp.err"

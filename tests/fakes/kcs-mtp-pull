@@ -6,12 +6,48 @@
 . "$(dirname "$0")/mtp-common.sh"
 fake_prelude "kcs-mtp-pull $*"
 [ -n "${FAKE_PULL_DELAY:-}" ] && sleep "$FAKE_PULL_DELAY"
-dest=""
-for a in "$@"; do case "$a" in --allow-reset|--no-release-interface) ;; *) dest="$a" ;; esac; done
+# Extras da sessao de destaques: --list-to, --get-match e --then. O "aparelho" fica em
+# $FAKE_DIR/hl-dev (espelho de caminhos) e $FAKE_DIR/hl-tree (saida do --list).
+all_args=" $* "
+dest=""; list_to=""; match=""; match_dir=""; then_prog=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --allow-reset|--no-release-interface) ;;
+    --list-to) list_to="$2"; shift ;;
+    --get-match) match="$2"; match_dir="$3"; shift 2 ;;
+    --then) then_prog="$2"; shift ;;
+    *) dest="$1" ;;
+  esac
+  shift
+done
+extras() {
+  [ -n "$list_to" ] && { cp "$FAKE_DIR/hl-tree" "$list_to" 2>/dev/null || : >"$list_to"; }
+  if [ -n "$match" ] && [ -d "$FAKE_DIR/hl-dev" ]; then
+    (cd "$FAKE_DIR/hl-dev" && find . -type f -name ksdk_annotation_v1.db) | sed 's#^\.##' |
+      while IFS= read -r p; do
+        # shellcheck disable=SC2254 # padrao de proposito
+        case "$p" in $match) mkdir -p "$(dirname "$match_dir$p")"; cp "$FAKE_DIR/hl-dev$p" "$match_dir$p"
+          echo "GOT 1 $(wc -c <"$match_dir$p" | tr -d ' ') $p -> $match_dir$p" ;; esac
+      done
+  fi
+  if [ -n "$then_prog" ]; then
+    KCS_TREE="$list_to" "$then_prog" | while IFS="$(printf '\t')" read -r w p d; do
+      [ "$w" = GET ] || continue
+      echo "kcs-mtp-pull $p" >>"$FAKE_DIR/calls.get"
+      if [ -f "$FAKE_DIR/hl-dev$p" ]; then
+        mkdir -p "$(dirname "$d")"; cp "$FAKE_DIR/hl-dev$p" "$d"
+        echo "GOT 2 $(wc -c <"$d" | tr -d ' ') $p -> $d"
+      else
+        echo "ERR nao encontrado: $p" >&2
+      fi
+    done
+  fi
+  return 0
+}
 [ -n "$dest" ] || { echo "uso: kcs-mtp-pull [--allow-reset] [--no-release-interface] <arquivo-destino>" >&2; exit 64; }
 if [ -e "$FAKE_DIR/nodevice" ]; then echo "kcs-mtp-pull: No raw devices found." >&2; exit 2; fi
 echo "kcs-mtp-pull: device 1949:9981 flags 0x18008106" >&2
-case " $* " in *" --no-release-interface "*) f=0x08008146 ;; *) f=0x08008106 ;; esac
+case "$all_args" in *" --no-release-interface "*) f=0x08008146 ;; *) f=0x08008106 ;; esac
 echo "kcs-mtp-pull: flags usados $f" >&2
 if fake_busy; then exit 2; fi
 # /documents na raiz (nivel 0 em $FAKE_DIR/folders).
@@ -22,9 +58,10 @@ if [ -z "$line" ]; then
   line="$(awk -F'\t' 'tolower($3) == "my clippings.txt" { print; exit }' "$FAKE_DIR/manifest")"
   where="/outro/My Clippings.txt"
 fi
-if [ -z "$line" ]; then echo "kcs-mtp-pull: My Clippings.txt not found" >&2; exit 3; fi
+if [ -z "$line" ]; then echo "kcs-mtp-pull: My Clippings.txt not found" >&2; extras; exit 3; fi
 if [ -e "$FAKE_DIR/getfile-nodev" ]; then echo "Error getting file from MTP device." >&2; exit 1; fi
 id="$(printf '%s' "$line" | cut -f1)"
 src="$(printf '%s' "$line" | cut -f4)"
 cp "$src" "$dest" || exit 1
 printf 'OK %s %s %s\n' "$id" "$(wc -c <"$src" | tr -d ' ')" "$where"
+extras

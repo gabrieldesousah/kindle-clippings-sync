@@ -35,6 +35,14 @@
 #   KCS_MTP_TIMEOUT         tempo maximo de cada comando mtp-* em segundos (padrao: 180)
 #   KCS_MTP_RESYNC_SECONDS  0 = uma vez por conexao; N = de novo apos N segundos conectado (padrao: 0)
 #   KCS_MTP_KILL_PTPCAMERAD 1 = encerra o ptpcamerad do macOS quando o MTP estiver ocupado (padrao: 0)
+#  Destaques do banco de anotacoes do Kindle (firmware 5.19.6+ nao grava mais o
+#  My Clippings.txt; so via MTP com o kcs-mtp-pull):
+#   KCS_HIGHLIGHTS          auto | 1 | 0 (padrao: auto = liga se o extrator estiver instalado)
+#   KCS_HIGHLIGHTS_SUBDIR   pasta das notas dentro do destino (padrao: Destaques)
+#   KCS_PYTHON              python do extrator (padrao: ~/.local/libexec/kindle-clippings-sync/venv/bin/python)
+#   KCS_HIGHLIGHTS_PY       extrator (padrao: ~/.local/libexec/kindle-clippings-sync/kcs_highlights.py)
+#   KCS_KFXLIB_PATH         pasta que contem o pacote kfxlib (padrao: ~/.local/libexec/kindle-clippings-sync/kfxlib)
+#   KCS_CACHE_DIR           cache dos livros baixados (padrao: ~/Library/Caches/kindle-clippings-sync)
 #  /Volumes:
 #   KCS_VOLUMES_ROOT        raiz dos volumes (padrao: /Volumes)
 #   KCS_MOUNT_DELAY         segundos de espera apos uma montagem recente (padrao: 5)
@@ -54,7 +62,8 @@ CLIPPINGS_REL="documents/$CLIPPINGS_NAME"
 CONFIG_VARS="KCS_VAULT KCS_DEST_SUBDIR KCS_DEST KCS_SOURCE KCS_LOG KCS_STATE_DIR KCS_NOTIFY \
 KCS_MAX_BACKUPS KCS_USB_VENDOR_ID KCS_MTP_PULL KCS_MTP_PULL_ARGS KCS_MTP_BIN_DIR KCS_MTP_DELAY KCS_MTP_RETRIES \
 KCS_MTP_RETRY_INTERVAL KCS_MTP_TIMEOUT KCS_MTP_RESYNC_SECONDS KCS_MTP_KILL_PTPCAMERAD \
-KCS_VOLUMES_ROOT KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_MOUNT_WINDOW KCS_REQUIRE_MARKER"
+KCS_VOLUMES_ROOT KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_MOUNT_WINDOW KCS_REQUIRE_MARKER \
+KCS_HIGHLIGHTS KCS_HIGHLIGHTS_SUBDIR KCS_PYTHON KCS_HIGHLIGHTS_PY KCS_KFXLIB_PATH KCS_CACHE_DIR"
 
 FORCE=0
 NOW=0
@@ -63,7 +72,7 @@ for arg in "$@"; do
     --now|--run-now) NOW=1 ;;
     --force) FORCE=1; NOW=1 ;;
     --version) echo "kindle-clippings-sync $VERSION"; exit 0 ;;
-    -h|--help) sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opcao desconhecida: $arg" >&2; exit 2 ;;
   esac
 done
@@ -110,6 +119,13 @@ KCS_RETRIES="${KCS_RETRIES:-3}"
 KCS_RETRY_INTERVAL="${KCS_RETRY_INTERVAL:-5}"
 KCS_MOUNT_WINDOW="${KCS_MOUNT_WINDOW:-90}"
 KCS_REQUIRE_MARKER="${KCS_REQUIRE_MARKER:-1}"
+KCS_LIBEXEC="$HOME/.local/libexec/kindle-clippings-sync"
+KCS_HIGHLIGHTS="${KCS_HIGHLIGHTS:-auto}"
+KCS_HIGHLIGHTS_SUBDIR="${KCS_HIGHLIGHTS_SUBDIR:-Destaques}"
+KCS_PYTHON="${KCS_PYTHON:-$KCS_LIBEXEC/venv/bin/python}"
+KCS_HIGHLIGHTS_PY="${KCS_HIGHLIGHTS_PY:-$KCS_LIBEXEC/kcs_highlights.py}"
+KCS_KFXLIB_PATH="${KCS_KFXLIB_PATH:-$KCS_LIBEXEC/kfxlib}"
+KCS_CACHE_DIR="${KCS_CACHE_DIR:-$HOME/Library/Caches/kindle-clippings-sync}"
 
 if [ "$NOW" = 1 ]; then
   KCS_MOUNT_DELAY=0
@@ -119,6 +135,11 @@ fi
 
 LOCK="$KCS_STATE_DIR/lock"
 WORK=""
+HL=0
+HL_DEV=""
+HL_TREE=""
+HL_SELECT=""
+HL_DB_PATTERN=""
 HAVE_LOCK=0
 RUNNING_PIDS=""
 
@@ -284,6 +305,15 @@ Nota gerada automaticamente pelo kindle-clippings-sync. Ela é reescrita a cada 
 Sempre que o Kindle é conectado ao Mac via USB, o launchd executa o script. Se o conteúdo de \`My Clippings.txt\` mudou desde a última sincronização (comparação por SHA-256), o arquivo é copiado para esta pasta e uma cópia datada vai para \`backups/\`. O assistente de leitura usa esse arquivo para gerar as notas de capítulo de cada livro.
 NOTE
   mv -f "$tmp" "$note"
+}
+
+# Pasta de destino no cofre (vazio se o cofre nao existe).
+dest_dir() {
+  if [ -n "$KCS_DEST" ]; then
+    printf '%s\n' "$KCS_DEST"
+  elif [ -d "$KCS_VAULT" ]; then
+    printf '%s\n' "$KCS_VAULT/$KCS_DEST_SUBDIR"
+  fi
 }
 
 # Sincroniza um arquivo local (do volume ou baixado via MTP) com o cofre.
@@ -457,8 +487,16 @@ mtp_pull() {
 mtp_pull_single() {
   local out="$1" txt="$WORK/mtp-pull.txt" rc
   rm -f "$out"
-  # shellcheck disable=SC2086 # KCS_MTP_PULL_ARGS pode ter varias opcoes
-  run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_PULL" $KCS_MTP_PULL_ARGS "$out" >"$txt" 2>&1 </dev/null
+  # KCS_MTP_PULL_ARGS pode ter varias opcoes (sem aspas de proposito)
+  if [ "$HL" = 1 ]; then
+    rm -rf "$HL_DEV" "$HL_TREE"
+    # shellcheck disable=SC2086
+    run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_PULL" $KCS_MTP_PULL_ARGS "$out" --list-to "$HL_TREE" \
+      --get-match "$HL_DB_PATTERN" "$HL_DEV" --then "$HL_SELECT" >"$txt" 2>&1 </dev/null
+  else
+    # shellcheck disable=SC2086
+    run_with_timeout "$KCS_MTP_TIMEOUT" "$MTP_PULL" $KCS_MTP_PULL_ARGS "$out" >"$txt" 2>&1 </dev/null
+  fi
   rc=$?
   if [ "$rc" -gt 128 ]; then log "kcs-mtp-pull excedeu ${KCS_MTP_TIMEOUT}s"; return 2; fi
   case "$rc" in
@@ -468,6 +506,10 @@ mtp_pull_single() {
         return 1
       fi
       log "baixado via MTP numa sessão: $(grep '^OK ' "$txt" | sed 's/^OK \([0-9]*\) \([0-9]*\) /item \1, \2 bytes, /') [$(grep 'flags usados' "$txt" | sed 's/.*flags usados //')]"
+      if [ "$HL" = 1 ]; then
+        log "destaques: $(grep -c '^GOT ' "$txt") arquivo(s) extra(s) na mesma sessão ($(grep -c '^GOT .*ksdk_annotation_v1.db' "$txt") banco(s), $(grep -c '^GOT .*\.kfx\.new$' "$txt") livro(s))"
+        grep -E '^(ERR|kcs_highlights:)' "$txt" | head -n 5 | while IFS= read -r l; do log "destaques: $l"; done
+      fi
       return 0
       ;;
     2|3) return "$rc" ;;
@@ -547,6 +589,63 @@ mtp_pull_tools() {
   return 0
 }
 
+# Aspas simples para gerar um script sh seguro.
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# Liga a coleta de destaques (banco de anotacoes + livros) na mesma sessao MTP?
+highlights_setup() {
+  HL=0
+  case "$KCS_HIGHLIGHTS" in
+    0|no|off) return 0 ;;
+  esac
+  if [ -z "$MTP_PULL" ] || [ ! -x "$KCS_PYTHON" ] || [ ! -f "$KCS_HIGHLIGHTS_PY" ]; then
+    [ "$KCS_HIGHLIGHTS" = 1 ] && log "aviso: destaques ligados, mas falta o kcs-mtp-pull, o python ($KCS_PYTHON) ou o extrator ($KCS_HIGHLIGHTS_PY); rode ./install.sh"
+    return 0
+  fi
+  HL_DEV="$WORK/device"
+  HL_TREE="$WORK/tree.tsv"
+  HL_SELECT="$WORK/kcs-select"
+  HL_DB_PATTERN='/system/ksdk/.annotations/amzn1.account.*/ksdk_annotation_v1.db'
+  mkdir -p "$KCS_CACHE_DIR/books" || return 0
+  {
+    echo '#!/bin/sh'
+    printf 'exec %s %s select --db-dir %s --cache %s\n' "$(sq "$KCS_PYTHON")" "$(sq "$KCS_HIGHLIGHTS_PY")" \
+      "$(sq "$HL_DEV")" "$(sq "$KCS_CACHE_DIR")"
+  } >"$HL_SELECT" && chmod +x "$HL_SELECT" && HL=1
+}
+
+# Depois da sessao: texto dos destaques e uma nota por livro no cofre.
+highlights_render() {
+  local name="$1" dest out rc line nb total new written nbk
+  [ "$HL" = 1 ] || return 0
+  dest="$(dest_dir)"
+  [ -n "$dest" ] || return 0
+  if [ ! -d "$HL_DEV" ]; then
+    log "destaques: nenhum banco de anotações veio do $name"
+    return 0
+  fi
+  out="$WORK/render.txt"
+  run_with_timeout "${KCS_HIGHLIGHTS_TIMEOUT:-300}" "$KCS_PYTHON" "$KCS_HIGHLIGHTS_PY" render --tree "$HL_TREE" \
+    --db-dir "$HL_DEV" --cache "$KCS_CACHE_DIR" --out "$dest/$KCS_HIGHLIGHTS_SUBDIR" --backups "$dest/backups" \
+    --state "$KCS_STATE_DIR" --kfxlib "$KCS_KFXLIB_PATH" --origin "MTP ($name): ksdk_annotation_v1.db" \
+    --max-backups "$KCS_MAX_BACKUPS" >"$out" 2>&1 </dev/null
+  rc=$?
+  line="$(grep '^DESTAQUES ' "$out" | tail -n 1)"
+  if [ "$rc" -ne 0 ] || [ -z "$line" ]; then
+    log "aviso: extração de destaques falhou (código $rc): $(grep -v '^DESTAQUES ' "$out" | tail -n 3 | tr '\n' ' ' | cut -c1-300)"
+    return 0
+  fi
+  grep '^kcs_highlights: ' "$out" | while IFS= read -r l; do log "destaques: ${l#kcs_highlights: }"; done
+  # shellcheck disable=SC2086
+  set -- $line
+  nb="$2"; total="$3"; new="$4"; written="$5"; nbk="${6:-0}"
+  log "destaques: $nb livro(s), $total anotações ($new novas), $written nota(s) atualizada(s) em $dest/$KCS_HIGHLIGHTS_SUBDIR${nbk:+, $nbk backup(s) do banco}"
+  if [ "${new:-0}" -gt 0 ] 2>/dev/null; then
+    if [ "$new" = 1 ]; then notify "Kindle: 1 destaque novo" "Kindle"; else notify "Kindle: $new destaques novos" "Kindle"; fi
+  fi
+  return 0
+}
+
 # Esta conexao USB ja foi sincronizada (e nao e hora de reler)?
 session_done() {
   local key="$1" now last_key last_time
@@ -617,7 +716,12 @@ run_mtp() {
 
   WORK="$(mktemp -d "${TMPDIR:-/tmp}/kcs-mtp.XXXXXX")" || { log "erro: mktemp falhou"; return 1; }
   tmpfile="$WORK/$CLIPPINGS_NAME"
-  log "$name detectado via USB/MTP; baixando $CLIPPINGS_REL"
+  highlights_setup
+  if [ "$HL" = 1 ]; then
+    log "$name detectado via USB/MTP; baixando $CLIPPINGS_REL e o banco de anotações"
+  else
+    log "$name detectado via USB/MTP; baixando $CLIPPINGS_REL"
+  fi
 
   attempt=1
   while :; do
@@ -626,6 +730,7 @@ run_mtp() {
     [ "$rc" -eq 0 ] && break
     if [ "$rc" -eq 3 ]; then
       log "$CLIPPINGS_NAME não existe no $name (nenhum destaque ainda?)"
+      highlights_render "$name"
       printf '%s\t%s\n' "$key" "$now" >"$session_file"
       return 0
     fi
@@ -663,6 +768,7 @@ run_mtp() {
 
   sync_file "$tmpfile" "MTP ($name): $CLIPPINGS_REL"
   rc=$?
+  [ "$rc" -eq 0 ] && highlights_render "$name"
   if [ "$rc" -eq 0 ]; then
     printf '%s\t%s\n' "$key" "$now" >"$session_file"
     rm -f "$KCS_STATE_DIR/mtp-failed"
