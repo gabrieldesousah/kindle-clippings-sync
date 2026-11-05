@@ -145,6 +145,33 @@ Pode rodar o `install.sh` de novo quantas vezes quiser (por exemplo depois de um
 | `--run-now` | depois de instalar, dispara via `launchctl kickstart` e mostra o log |
 | `--no-load` | só gera os arquivos, sem carregar no `launchd` |
 
+## Aviso no Grok Bot (webhook)
+
+Depois de cada sincronização que de fato falou com o Kindle (sucesso ou erro; não nos disparos repetidos da mesma conexão USB), o script pode mandar um resumo em JSON para uma rotina do Grok Bot via webhook.
+
+1. No app do Grok Bot, abra a rotina **"Aviso da sincronização do Kindle"** (ou a que você criou) e copie a **URL do webhook** e a **sender key**.
+2. No Terminal:
+
+```bash
+kindle-clippings-sync --setup-notify
+```
+
+Ele pede a URL (visível), a chave (digitação oculta) e, se quiser, o nome do header HTTP da chave. Grava só essas linhas em `~/.config/kindle-clippings-sync/config.env` (`chmod 600`) e envia um POST de teste (`status: "test"`), mostrando só o código HTTP. Para reenviar o teste depois: `kindle-clippings-sync --test-notify`.
+
+Autenticação:
+
+| Variável | Padrão | Efeito |
+| --- | --- | --- |
+| `KCS_NOTIFY_URL` | (vazio) | URL do webhook; vazio = não envia |
+| `KCS_NOTIFY_KEY` | (vazio) | sender key; **nunca** é impressa nem vai para o log |
+| `KCS_NOTIFY_KEY_HEADER` | `Authorization` | com o padrão, o header vai como `Authorization: Bearer <chave>`; se você puser outro nome (ex.: `X-Webhook-Key`), a chave vai pura nesse header |
+
+O POST usa `curl` (timeout 10 s, `--retry 2`). Se o webhook falhar, a sincronização **não** falha: o log registra só `webhook: HTTP NNN` ou `webhook: falha ao enviar`. A chave jamais aparece no log.
+
+Payload (campos principais): `ran_at` (ISO com offset `-03:00`), `device`, `status` (`ok` / `error` / `test`), `error`, `my_clippings` (`changed`, `entries`), `highlights` (lista por livro com `title`, `note_file` relativo ao cofre, totais e contagem de novos/alterados), `totals`, e `new_highlights` (textos novos, até 50, cada um com no máximo ~300 caracteres, com `location` e `chapter` quando existirem).
+
+O `install.sh` preserva essas três variáveis numa reinstalação. Elas **não** são pedidas pelo instalador: use `--setup-notify`.
+
 ## Desinstalação
 
 ```bash
@@ -287,6 +314,7 @@ Os testes rodam em Linux ou macOS com um `/Volumes`, um cofre e um `HOME` falsos
 - `/Volumes`: ausência de Kindle, pendrive sem marcador, cópia byte a byte com BOM e CRLF, backup, execução sem mudança, nova entrada, lock, `--force`, config por arquivo, cofre inexistente;
 - MTP: uma única sessão por sincronização, disparos simultâneos abrindo uma sessão só, SIGTERM ignorado herdado (timeout continua funcionando), reserva com as ferramentas `mtp-*`, Kindle ausente no `ioreg` (nada de MTP é chamado), escolha da cópia em `documents` entre iscas em outras pastas, reexecução na mesma conexão sem abrir o MTP, reconexão, aparelho ocupado (com e sem recuperação), `No devices.` no `mtp-getfile`, comando travado (timeout), aparelho sem `My Clippings.txt`, libmtp ausente, ferramentas achadas pelo PATH, prioridade do MTP sobre `/Volumes`;
 - `kcs-mtp-pull` em C, compilado contra um libmtp falso (`tests/stub-libmtp/`): modo padrão, `--list`, `--get`, `--get-dir`, `--get-id`, várias operações numa sessão só, reset desligado, erros e códigos de saída;
+- webhook do Grok Bot: POST após sync que falou com o Kindle, payload, sem URL = sem POST, falha do curl não quebra a sync, chave fora do log, header customizado, `--test-notify`, destaques no payload, `install.sh` preserva as linhas;
 - destaques: `--list-to`, `--get-match` (sem o `anonymous`) e `--then` na mesma sessão, cache dos livros fora do cofre, texto pelo kfxlib falso (`tests/fakes/pylib/`), capítulos, notas, imagem, livro com DRM e livro ausente (só posições), backup do banco, segunda execução sem baixar nem reescrever, destaque alterado e apagado, livro alterado no aparelho, sem kfxlib, `KCS_HIGHLIGHTS=0`; banco e livros falsos gerados por `tests/fixtures/make-kindle-hl.py`;
 - instalador: plist com e sem helper (`LaunchEvents`, `idVendor`, `idProduct`, `StartInterval`), `--product-id any`, `--interval`, `--no-iokit`, `--install-deps`, reinstalação preservando a config, execução ponta a ponta pelo helper e desinstalação.
 

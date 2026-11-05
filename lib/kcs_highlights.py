@@ -371,9 +371,10 @@ def save_state(state_dir, asin, st):
 
 
 def merge(st, recs):
-    """Dedup por id + data de modificacao. Devolve (novos, alterados)."""
+    """Dedup por id + data de modificacao. Devolve (novos, alterados, ids_novos, ids_alterados)."""
     items = st.setdefault("items", {})
     new = changed = 0
+    new_ids, changed_ids = [], []
     current = set()
     for r in recs:
         current.add(r["id"])
@@ -381,14 +382,24 @@ def merge(st, recs):
         if old is None:
             items[r["id"]] = dict(r, removed=False)
             new += 1
+            new_ids.append(r["id"])
         elif old.get("modified") != r["modified"] or old.get("removed"):
             items[r["id"]] = dict(r, removed=False)
             changed += 1
+            changed_ids.append(r["id"])
     for aid, it in items.items():
         if aid not in current and not it.get("removed"):
             it["removed"] = True
             changed += 1
-    return new, changed
+            changed_ids.append(aid)
+    return new, changed, new_ids, changed_ids
+
+
+def trim_text(t, n=300):
+    t = (t or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(t) <= n:
+        return t
+    return t[: max(0, n - 1)].rstrip() + "..."
 
 
 def build_note(asin, title, authors, items, book, reason, origin):
@@ -521,14 +532,28 @@ def backup_dbs(dbs, backups, state_dir, keep):
     return n
 
 
+def write_summary(path, books, new_highlights, totals):
+    if not path:
+        return
+    payload = {"books": books, "totals": totals, "new_highlights": new_highlights}
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    os.replace(path + ".tmp", path)
+
+
 def cmd_render(a):
     tree = read_tree(a.tree)
     tree_books = books_on_device(tree)
     promote(a.cache, tree_books)
     dbs = find_dbs(a.db_dir)
+    empty_totals = {"books": 0, "annotations": 0, "new": 0, "changed": 0}
     if not dbs:
         sys.stderr.write("kcs_highlights: nenhum banco de anotações baixado\n")
         print("DESTAQUES 0 0 0 0")
+        write_summary(a.summary, [], [], empty_totals)
         return 0
     per_book = {}
     for db in dbs:
@@ -536,11 +561,15 @@ def cmd_render(a):
             per_book.setdefault(asin, []).extend(recs)
     state_dir = os.path.join(a.state, "highlights")
     os.makedirs(a.out, exist_ok=True)
-    nbooks = ntotal = nnew = nwritten = 0
+    nbooks = ntotal = nnew = nchanged = nwritten = 0
+    books_out = []
+    new_highlights = []
+    note_rel = (a.note_rel or "").rstrip("/")
     for asin, recs in sorted(per_book.items()):
         st = load_state(state_dir, asin)
-        new, changed = merge(st, recs)
+        new, changed, new_ids, _changed_ids = merge(st, recs)
         items = list(st["items"].values())
+        by_id = {i["id"]: i for i in items}
         kfx = os.path.join(a.cache, "books", asin + ".kfx")
         book, reason = None, ""
         dev = tree_books.get(asin)
@@ -578,13 +607,42 @@ def cmd_render(a):
             nwritten += 1
         st["note"] = name
         save_state(state_dir, asin, st)
+        hl = [i for i in items if i["kind"] == "highlight" and not i.get("removed")]
+        notes = [i for i in items if i["kind"] == "note" and not i.get("removed")]
+        note_file = "%s/%s" % (note_rel, name) if note_rel else name
+        books_out.append({
+            "title": clean(title),
+            "note_file": note_file,
+            "total_highlights": len(hl),
+            "total_notes": len(notes),
+            "new": new,
+            "changed": changed,
+        })
+        for aid in new_ids:
+            if len(new_highlights) >= 50:
+                break
+            it = by_id.get(aid)
+            if not it or it.get("removed") or it.get("kind") != "highlight":
+                continue
+            text = it.get("text") or it.get("note_text") or ""
+            if it.get("image") and not text:
+                text = "(destaque sobre uma imagem do livro, sem texto)"
+            new_highlights.append({
+                "title": clean(title),
+                "chapter": clean(it.get("chapter") or "") or None,
+                "location": it.get("location") or None,
+                "text": trim_text(clean(text), 300),
+            })
         nbooks += 1
         ntotal += sum(1 for i in items if not i.get("removed"))
         nnew += new
+        nchanged += changed
         sys.stderr.write("kcs_highlights: %s: %d anotações (%d novas, %d alteradas), texto: %s\n" %
                          (name, len(items), new, changed, "ok" if book is not None else reason))
     nb = backup_dbs(dbs, a.backups, a.state, a.max_backups)
     print("DESTAQUES %d %d %d %d %d" % (nbooks, ntotal, nnew, nwritten, nb))
+    write_summary(a.summary, books_out, new_highlights,
+                  {"books": nbooks, "annotations": ntotal, "new": nnew, "changed": nchanged})
     return 0
 
 
@@ -605,6 +663,8 @@ def main(argv=None):
     r.add_argument("--kfxlib", default=os.environ.get("KCS_KFXLIB_PATH", ""))
     r.add_argument("--origin", default="Kindle: ksdk_annotation_v1.db")
     r.add_argument("--max-backups", type=int, default=0)
+    r.add_argument("--summary", default="", help="grava um JSON com o resumo dos destaques (para o webhook)")
+    r.add_argument("--note-rel", default="", help="prefixo relativo da nota dentro do cofre")
     a = p.parse_args(argv)
     if a.cmd == "select":
         return cmd_select(a)

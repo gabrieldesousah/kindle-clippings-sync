@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.." || exit 1
 rc=0
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -x bin/kindle-clippings-sync.sh install.sh uninstall.sh tests/*.sh \
-    tests/fakes/ioreg tests/fakes/mtp-* tests/fakes/brew tests/fakes/kcs-iokit-trigger tests/fakes/kcs-mtp-pull || rc=1
+    tests/fakes/ioreg tests/fakes/mtp-* tests/fakes/brew tests/fakes/kcs-iokit-trigger tests/fakes/kcs-mtp-pull tests/fakes/curl || rc=1
 else
   echo "shellcheck nao encontrado; pulando"
 fi

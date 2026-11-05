@@ -1,0 +1,49 @@
+#!/bin/bash
+# curl falso: captura o POST do webhook do kindle-clippings-sync.
+# Escreve em $FAKE_DIR: curl.args (argv), curl.headers (um por linha), curl.body (payload),
+# curl.url. Responde o codigo em FAKE_DIR/curl.http (padrao 200) no stdout quando -w %{http_code}.
+# FAKE_DIR/curl.fail=1 faz o curl "falhar" (exit 7, codigo 000).
+set -u
+: "${FAKE_DIR:?FAKE_DIR unset}"
+mkdir -p "$FAKE_DIR"
+: >"$FAKE_DIR/curl.args"
+: >"$FAKE_DIR/curl.headers"
+out=""
+write_fmt=""
+data=""
+url=""
+while [ $# -gt 0 ]; do
+  printf '%s\n' "$1" >>"$FAKE_DIR/curl.args"
+  case "$1" in
+    -o) shift; out="${1:-}"; printf '%s\n' "$1" >>"$FAKE_DIR/curl.args" ;;
+    -w) shift; write_fmt="${1:-}"; printf '%s\n' "$1" >>"$FAKE_DIR/curl.args" ;;
+    -H) shift; printf '%s\n' "$1" >>"$FAKE_DIR/curl.headers"; printf '%s\n' "$1" >>"$FAKE_DIR/curl.args" ;;
+    --data-binary|--data|-d)
+      shift
+      data="${1:-}"
+      printf '%s\n' "$1" >>"$FAKE_DIR/curl.args"
+      ;;
+    --connect-timeout|--max-time|--retry|-X)
+      shift
+      printf '%s\n' "$1" >>"$FAKE_DIR/curl.args"
+      ;;
+    -sS|-s|-S|-f|-L) ;;
+    http://*|https://*) url="$1" ;;
+  esac
+  shift
+done
+printf '%s\n' "$url" >"$FAKE_DIR/curl.url"
+if [ -n "$data" ]; then
+  case "$data" in
+    @*) cp "${data#@}" "$FAKE_DIR/curl.body" 2>/dev/null || : >"$FAKE_DIR/curl.body" ;;
+    *) printf '%s' "$data" >"$FAKE_DIR/curl.body" ;;
+  esac
+fi
+if [ "${FAKE_CURL_FAIL:-0}" = 1 ] || [ -f "$FAKE_DIR/curl.fail" ]; then
+  [ -n "$out" ] && : >"$out"
+  exit 7
+fi
+code="$(cat "$FAKE_DIR/curl.http" 2>/dev/null || echo 200)"
+[ -n "$out" ] && printf 'ok\n' >"$out"
+case "$write_fmt" in *http_code*) printf '%s' "$code" ;; esac
+exit 0

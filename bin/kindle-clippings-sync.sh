@@ -10,9 +10,11 @@
 #
 # Compativel com o /bin/bash 3.2 do macOS.
 #
-# Uso: kindle-clippings-sync.sh [--now] [--force] [--help]
-#   --now    sem espera inicial e ignora o "ja sincronizado nesta conexao"
-#   --force  copia mesmo que o conteudo nao tenha mudado (implica --now)
+# Uso: kindle-clippings-sync.sh [--now] [--force] [--setup-notify] [--test-notify] [--help]
+#   --now           sem espera inicial e ignora o "ja sincronizado nesta conexao"
+#   --force         copia mesmo que o conteudo nao tenha mudado (implica --now)
+#   --setup-notify  configura o webhook do Grok Bot (URL + chave) e envia um POST de teste
+#   --test-notify   reenvia um POST de teste com a config atual (sem sincronizar)
 #
 # Configuracao (arquivo de config ou variaveis de ambiente; o ambiente vence):
 #   KCS_VAULT               cofre do Obsidian
@@ -22,6 +24,10 @@
 #   KCS_LOG                 arquivo de log (padrao: ~/Library/Logs/kindle-clippings-sync.log)
 #   KCS_STATE_DIR           estado interno: hash, sessao USB e lock
 #   KCS_NOTIFY              1 notifica via osascript, 0 desliga (padrao: 1)
+#   KCS_NOTIFY_URL          URL do webhook (Grok Bot routine); vazio = nao envia
+#   KCS_NOTIFY_KEY          chave do webhook (nunca e logada nem impressa)
+#   KCS_NOTIFY_KEY_HEADER   header da chave (padrao: Authorization -> "Bearer <chave>";
+#                           outro nome, ex. X-Webhook-Key, envia a chave pura nesse header)
 #   KCS_MAX_BACKUPS         manter so os N backups mais recentes; 0 = todos (padrao: 0)
 #  MTP:
 #   KCS_USB_VENDOR_ID       idVendor do Kindle em decimal (padrao: 6473 = 0x1949, Amazon)
@@ -60,6 +66,7 @@ CLIPPINGS_NAME="My Clippings.txt"
 CLIPPINGS_REL="documents/$CLIPPINGS_NAME"
 
 CONFIG_VARS="KCS_VAULT KCS_DEST_SUBDIR KCS_DEST KCS_SOURCE KCS_LOG KCS_STATE_DIR KCS_NOTIFY \
+KCS_NOTIFY_URL KCS_NOTIFY_KEY KCS_NOTIFY_KEY_HEADER \
 KCS_MAX_BACKUPS KCS_USB_VENDOR_ID KCS_MTP_PULL KCS_MTP_PULL_ARGS KCS_MTP_BIN_DIR KCS_MTP_DELAY KCS_MTP_RETRIES \
 KCS_MTP_RETRY_INTERVAL KCS_MTP_TIMEOUT KCS_MTP_RESYNC_SECONDS KCS_MTP_KILL_PTPCAMERAD \
 KCS_VOLUMES_ROOT KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_MOUNT_WINDOW KCS_REQUIRE_MARKER \
@@ -67,12 +74,15 @@ KCS_HIGHLIGHTS KCS_HIGHLIGHTS_SUBDIR KCS_PYTHON KCS_HIGHLIGHTS_PY KCS_KFXLIB_PAT
 
 FORCE=0
 NOW=0
+MODE=sync
 for arg in "$@"; do
   case "$arg" in
     --now|--run-now) NOW=1 ;;
     --force) FORCE=1; NOW=1 ;;
+    --setup-notify) MODE=setup-notify ;;
+    --test-notify) MODE=test-notify ;;
     --version) echo "kindle-clippings-sync $VERSION"; exit 0 ;;
-    -h|--help) sed -n '2,57p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,65p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "opcao desconhecida: $arg" >&2; exit 2 ;;
   esac
 done
@@ -102,6 +112,9 @@ KCS_SOURCE="${KCS_SOURCE:-auto}"
 KCS_LOG="${KCS_LOG:-$HOME/Library/Logs/kindle-clippings-sync.log}"
 KCS_STATE_DIR="${KCS_STATE_DIR:-$HOME/Library/Application Support/kindle-clippings-sync}"
 KCS_NOTIFY="${KCS_NOTIFY:-1}"
+KCS_NOTIFY_URL="${KCS_NOTIFY_URL:-}"
+KCS_NOTIFY_KEY="${KCS_NOTIFY_KEY:-}"
+KCS_NOTIFY_KEY_HEADER="${KCS_NOTIFY_KEY_HEADER:-Authorization}"
 KCS_MAX_BACKUPS="${KCS_MAX_BACKUPS:-0}"
 KCS_USB_VENDOR_ID="${KCS_USB_VENDOR_ID:-6473}"
 KCS_MTP_PULL="${KCS_MTP_PULL:-}"
@@ -142,6 +155,14 @@ HL_SELECT=""
 HL_DB_PATTERN=""
 HAVE_LOCK=0
 RUNNING_PIDS=""
+# Resumo para o webhook do Grok Bot (preenchido so quando a sync fala com o Kindle).
+NOTIFY_TALKED=0
+NOTIFY_DEVICE=""
+NOTIFY_STATUS="ok"
+NOTIFY_ERROR=""
+NOTIFY_CLIP_CHANGED=0
+NOTIFY_CLIP_ENTRIES=0
+NOTIFY_HL_SUMMARY=""
 
 # shellcheck disable=SC2329 # chamada pelo trap
 cleanup() {
@@ -200,6 +221,195 @@ notify() {
   osascript -e "display notification \"$(as_escape "$msg")\" with title \"$(as_escape "$title")\"" \
     >/dev/null 2>&1 || log "aviso: falha ao exibir notificação"
 }
+
+# Python para montar o JSON do webhook (stdlib). Prefere o do extrator; cai no python3 do PATH.
+notify_python() {
+  if [ -x "$KCS_PYTHON" ]; then echo "$KCS_PYTHON"; return 0; fi
+  command -v python3 2>/dev/null || command -v python 2>/dev/null
+}
+
+# Grava/substitui so a linha KEY=... no config.env (chmod 600). Nunca imprime o valor.
+config_set() {
+  local key="$1" val="$2" tmp dir
+  dir="$(dirname "$KCS_CONFIG")"
+  mkdir -p "$dir" || return 1
+  touch "$KCS_CONFIG" || return 1
+  tmp="$(mktemp "${TMPDIR:-/tmp}/kcs-cfg.XXXXXX")" || return 1
+  # Remove linhas antigas dessa chave (com ou sem export).
+  grep -Ev "^[[:space:]]*(export[[:space:]]+)?${key}=" "$KCS_CONFIG" >"$tmp" 2>/dev/null || : >"$tmp"
+  printf '%s=%s\n' "$key" "$(sq "$val")" >>"$tmp"
+  mv -f "$tmp" "$KCS_CONFIG"
+  chmod 600 "$KCS_CONFIG"
+}
+
+# Header HTTP da chave: Authorization -> "Bearer <chave>"; outro nome -> chave pura.
+notify_auth_header() {
+  local hdr="${KCS_NOTIFY_KEY_HEADER:-Authorization}"
+  if [ "$hdr" = "Authorization" ] || [ "$hdr" = "authorization" ]; then
+    printf '%s: Bearer %s' "$hdr" "$KCS_NOTIFY_KEY"
+  else
+    printf '%s: %s' "$hdr" "$KCS_NOTIFY_KEY"
+  fi
+}
+
+# POST do JSON em $1 para KCS_NOTIFY_URL. Devolve o codigo HTTP em stdout; 000 se curl falhar.
+# Nunca loga a chave. So o status HTTP vai ao log.
+notify_post() {
+  local payload="$1" code body curlbin hdr
+  curlbin="$(command -v curl || true)"
+  if [ -z "$curlbin" ]; then
+    log "webhook: curl nao encontrado; notificacao nao enviada"
+    echo 000
+    return 1
+  fi
+  body="$(mktemp "${TMPDIR:-/tmp}/kcs-wh-body.XXXXXX")" || { echo 000; return 1; }
+  hdr="$(notify_auth_header)"
+  # --retry 2: ate 3 tentativas em falha de rede. Timeout curto.
+  code="$("$curlbin" -sS -o "$body" -w "%{http_code}" --connect-timeout 10 --max-time 10 --retry 2 \
+    -X POST -H "Content-Type: application/json; charset=utf-8" -H "$hdr" \
+    --data-binary @"$payload" "$KCS_NOTIFY_URL" 2>/dev/null)" || code=""
+  rm -f "$body"
+  case "$code" in *[!0-9]*|"") code=000 ;; esac
+  printf '%s\n' "$code"
+}
+
+# Monta o payload completo e envia. Nunca falha a sync por causa do webhook.
+webhook_notify() {
+  local py payload code hl_json clip_changed ran_at
+  [ "$NOTIFY_TALKED" = 1 ] || return 0
+  [ -n "$KCS_NOTIFY_URL" ] || return 0
+  py="$(notify_python)"
+  if [ -z "$py" ]; then
+    log "webhook: sem python para montar o JSON; notificacao nao enviada"
+    return 0
+  fi
+  payload="$(mktemp "${TMPDIR:-/tmp}/kcs-wh.XXXXXX")" || return 0
+  hl_json="${NOTIFY_HL_SUMMARY:-}"
+  [ -n "$hl_json" ] && [ -f "$hl_json" ] || hl_json=""
+  clip_changed=false
+  [ "$NOTIFY_CLIP_CHANGED" = 1 ] && clip_changed=true
+  # Offset fixo -03:00 (America/Sao_Paulo sem horario de verao desde 2019).
+  ran_at="$(date '+%Y-%m-%dT%H:%M:%S')-03:00"
+  if ! KCS_WH_RAN_AT="$ran_at" KCS_WH_DEVICE="$NOTIFY_DEVICE" KCS_WH_STATUS="$NOTIFY_STATUS" \
+    KCS_WH_ERROR="$NOTIFY_ERROR" KCS_WH_CLIP_CHANGED="$clip_changed" \
+    KCS_WH_CLIP_ENTRIES="$NOTIFY_CLIP_ENTRIES" KCS_WH_HL_JSON="$hl_json" \
+    "$py" - "$payload" <<'PY'
+import json, os, sys
+out = sys.argv[1]
+hl = {"books": [], "totals": {"books": 0, "annotations": 0, "new": 0, "changed": 0}, "new_highlights": []}
+path = os.environ.get("KCS_WH_HL_JSON") or ""
+if path and os.path.isfile(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            hl = json.load(f)
+    except (OSError, ValueError):
+        pass
+err = os.environ.get("KCS_WH_ERROR") or None
+if err == "":
+    err = None
+payload = {
+    "ran_at": os.environ.get("KCS_WH_RAN_AT") or "",
+    "device": os.environ.get("KCS_WH_DEVICE") or "",
+    "status": os.environ.get("KCS_WH_STATUS") or "ok",
+    "error": err,
+    "my_clippings": {
+        "changed": (os.environ.get("KCS_WH_CLIP_CHANGED") == "true"),
+        "entries": int(os.environ.get("KCS_WH_CLIP_ENTRIES") or 0),
+    },
+    "highlights": hl.get("books") or [],
+    "totals": hl.get("totals") or {"books": 0, "annotations": 0, "new": 0, "changed": 0},
+}
+news = hl.get("new_highlights") or []
+if news:
+    payload["new_highlights"] = news
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+PY
+  then
+    log "webhook: falha ao montar o JSON; notificacao nao enviada"
+    rm -f "$payload"
+    return 0
+  fi
+  code="$(notify_post "$payload")"
+  rm -f "$payload"
+  if [ "$code" = 000 ]; then
+    log "webhook: falha ao enviar (rede/curl); a sincronizacao segue"
+  elif [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 300 ] 2>/dev/null; then
+    log "webhook: HTTP $code"
+  else
+    log "webhook: HTTP $code (a sincronizacao segue)"
+  fi
+  return 0
+}
+
+# POST de teste (status=test). Usado por --setup-notify e --test-notify.
+test_notify() {
+  local py payload code
+  if [ -z "$KCS_NOTIFY_URL" ]; then
+    echo "KCS_NOTIFY_URL nao configurada. Rode: kindle-clippings-sync --setup-notify" >&2
+    return 1
+  fi
+  if [ -z "$KCS_NOTIFY_KEY" ]; then
+    echo "KCS_NOTIFY_KEY nao configurada. Rode: kindle-clippings-sync --setup-notify" >&2
+    return 1
+  fi
+  py="$(notify_python)"
+  [ -n "$py" ] || { echo "python3 nao encontrado" >&2; return 1; }
+  payload="$(mktemp "${TMPDIR:-/tmp}/kcs-wh-test.XXXXXX")" || return 1
+  "$py" - "$payload" <<'PY'
+import json, sys, datetime
+out = sys.argv[1]
+now = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S") + "-03:00"
+json.dump({
+    "ran_at": now,
+    "device": "teste",
+    "status": "test",
+    "error": None,
+    "my_clippings": {"changed": False, "entries": 0},
+    "highlights": [],
+    "totals": {"books": 0, "annotations": 0, "new": 0, "changed": 0},
+}, open(out, "w", encoding="utf-8"), ensure_ascii=False)
+PY
+  echo "Enviando POST de teste para o webhook..."
+  code="$(notify_post "$payload")"
+  rm -f "$payload"
+  echo "HTTP $code"
+  case "$code" in
+    2??) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+setup_notify() {
+  local url key hdr
+  echo "Configuracao do aviso no Grok Bot (webhook da rotina)."
+  echo "A URL e a chave ficam so em $KCS_CONFIG (chmod 600); a chave nunca e impressa."
+  printf "URL do webhook: "
+  IFS= read -r url || true
+  if [ -z "$url" ]; then
+    echo "URL vazia; cancelado." >&2
+    return 2
+  fi
+  printf "Chave (sender key, digitacao oculta): "
+  IFS= read -rs key || true
+  printf '\n'
+  if [ -z "$key" ]; then
+    echo "Chave vazia; cancelado." >&2
+    return 2
+  fi
+  printf "Header da chave [%s]: " "${KCS_NOTIFY_KEY_HEADER:-Authorization}"
+  IFS= read -r hdr || true
+  [ -n "$hdr" ] || hdr="${KCS_NOTIFY_KEY_HEADER:-Authorization}"
+  config_set KCS_NOTIFY_URL "$url" || return 1
+  config_set KCS_NOTIFY_KEY "$key" || return 1
+  config_set KCS_NOTIFY_KEY_HEADER "$hdr" || return 1
+  KCS_NOTIFY_URL="$url"
+  KCS_NOTIFY_KEY="$key"
+  KCS_NOTIFY_KEY_HEADER="$hdr"
+  echo "Salvo. Enviando POST de teste..."
+  test_notify
+}
+
 
 # Roda um comando com limite de tempo (o macOS nao tem `timeout`).
 # Nao depende de SIGTERM: se o processo herdou SIGTERM ignorado (o que acontecia
@@ -351,6 +561,8 @@ sync_file() {
       log "sem alterações ($origin, sha256 ${src_hash:0:12})"
       printf '%s\n' "$src_hash" >"$KCS_STATE_DIR/unchanged.logged"
     fi
+    NOTIFY_CLIP_CHANGED=0
+    NOTIFY_CLIP_ENTRIES="$(count_entries "$dest_file")"
     return 0
   fi
 
@@ -393,6 +605,8 @@ sync_file() {
   rm -f "$KCS_STATE_DIR/unchanged.logged"
 
   log "sincronizado: $entries entradas de $origin para $dest_file (backup: $(basename "$backup"))"
+  NOTIFY_CLIP_CHANGED=1
+  NOTIFY_CLIP_ENTRIES="$entries"
   if [ "$entries" = 1 ]; then
     notify "Kindle sincronizado: 1 destaque" "Kindle"
   else
@@ -625,10 +839,14 @@ highlights_render() {
     return 0
   fi
   out="$WORK/render.txt"
+  NOTIFY_HL_SUMMARY="$WORK/highlights-summary.json"
+  note_rel="$KCS_DEST_SUBDIR/$KCS_HIGHLIGHTS_SUBDIR"
+  [ -n "$KCS_DEST" ] && note_rel="$(basename "$KCS_DEST")/$KCS_HIGHLIGHTS_SUBDIR"
   run_with_timeout "${KCS_HIGHLIGHTS_TIMEOUT:-300}" "$KCS_PYTHON" "$KCS_HIGHLIGHTS_PY" render --tree "$HL_TREE" \
     --db-dir "$HL_DEV" --cache "$KCS_CACHE_DIR" --out "$dest/$KCS_HIGHLIGHTS_SUBDIR" --backups "$dest/backups" \
     --state "$KCS_STATE_DIR" --kfxlib "$KCS_KFXLIB_PATH" --origin "MTP ($name): ksdk_annotation_v1.db" \
-    --max-backups "$KCS_MAX_BACKUPS" >"$out" 2>&1 </dev/null
+    --max-backups "$KCS_MAX_BACKUPS" --summary "$NOTIFY_HL_SUMMARY" --note-rel "$note_rel" \
+    >"$out" 2>&1 </dev/null
   rc=$?
   line="$(grep '^DESTAQUES ' "$out" | tail -n 1)"
   if [ "$rc" -ne 0 ] || [ -z "$line" ]; then
@@ -689,6 +907,11 @@ run_mtp() {
   # Outra execucao pode ter terminado esta mesma conexao enquanto esperavamos.
   session_done "$key" && return 0
 
+  NOTIFY_TALKED=1
+  NOTIFY_DEVICE="$name"
+  NOTIFY_STATUS="ok"
+  NOTIFY_ERROR=""
+
   # Ja falhou nesta conexao (aparelho ocupado)? Nas rodadas automaticas seguintes
   # tenta so uma vez, para nao segurar o job nem encher o log.
   if [ "$NOW" != 1 ] && [ "$(cat "$KCS_STATE_DIR/mtp-failed" 2>/dev/null)" = "$key" ]; then
@@ -705,6 +928,9 @@ run_mtp() {
       notify "Instale o libmtp: brew install libmtp" "Kindle: erro"
       printf '%s\n' "$key" >"$KCS_STATE_DIR/mtp-notified"
     fi
+    NOTIFY_STATUS="error"
+    NOTIFY_ERROR="libmtp não encontrado"
+    webhook_notify
     return 1
   fi
   if [ -z "$MTP_PULL" ]; then
@@ -732,6 +958,7 @@ run_mtp() {
       log "$CLIPPINGS_NAME não existe no $name (nenhum destaque ainda?)"
       highlights_render "$name"
       printf '%s\t%s\n' "$key" "$now" >"$session_file"
+      webhook_notify
       return 0
     fi
     if [ "$rc" -eq 2 ]; then
@@ -753,6 +980,9 @@ run_mtp() {
       notify "Kindle ocupado por outro app. Feche o Android File Transfer e reconecte." "Kindle: erro"
       printf '%s\n' "$key" >"$KCS_STATE_DIR/mtp-notified"
     fi
+    NOTIFY_STATUS="error"
+    NOTIFY_ERROR="falha ao baixar via MTP após $KCS_MTP_RETRIES tentativas"
+    webhook_notify
     return 1
   fi
 
@@ -768,11 +998,15 @@ run_mtp() {
 
   sync_file "$tmpfile" "MTP ($name): $CLIPPINGS_REL"
   rc=$?
-  [ "$rc" -eq 0 ] && highlights_render "$name"
   if [ "$rc" -eq 0 ]; then
+    highlights_render "$name"
     printf '%s\t%s\n' "$key" "$now" >"$session_file"
     rm -f "$KCS_STATE_DIR/mtp-failed"
+  else
+    NOTIFY_STATUS="error"
+    NOTIFY_ERROR="falha ao gravar no cofre"
   fi
+  webhook_notify
   return "$rc"
 }
 
@@ -832,10 +1066,26 @@ run_volumes() {
   [ -n "$src" ] || return 0 # nenhum Kindle: sai em silencio
 
   acquire_lock
+  NOTIFY_TALKED=1
+  NOTIFY_DEVICE="$(basename "${src%"/$CLIPPINGS_REL"}")"
+  NOTIFY_STATUS="ok"
+  NOTIFY_ERROR=""
   sync_file "$src" "$src"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    NOTIFY_STATUS="error"
+    NOTIFY_ERROR="falha ao gravar no cofre"
+  fi
+  webhook_notify
+  return "$rc"
 }
 
 # --- execucao ---------------------------------------------------------------
+case "$MODE" in
+  setup-notify) setup_notify; exit $? ;;
+  test-notify) test_notify; exit $? ;;
+esac
+
 mkdir -p "$(dirname "$KCS_LOG")" 2>/dev/null
 rotate_log
 

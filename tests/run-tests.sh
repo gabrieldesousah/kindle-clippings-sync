@@ -38,6 +38,7 @@ FAKE
 chmod +x "$TMP/fakebin/osascript"
 FAKES="$REPO_DIR/tests/fakes"
 ln -s "$FAKES/ioreg" "$TMP/fakebin/ioreg" # so o ioreg vai para o PATH; os mtp-* nao
+ln -s "$FAKES/curl" "$TMP/fakebin/curl" # webhook do Grok Bot
 export PATH="$TMP/fakebin:$PATH"
 export FAKE_DIR="$TMP/fake"
 mkdir -p "$FAKE_DIR"
@@ -484,6 +485,94 @@ else
   rm -rf "$HDEV" "$FAKE_DIR/hl-tree"
 fi
 
+echo "M16) Webhook do Grok Bot (KCS_NOTIFY_URL)"
+# O curl falso em tests/fakes/curl captura o POST. A chave NUNCA pode aparecer no log.
+WH_URL="https://hooks.example.test/kindle-sync"
+WH_KEY="segredo-de-teste-NUNCA-no-log"
+rm -f "$FAKE_DIR/curl.body" "$FAKE_DIR/curl.headers" "$FAKE_DIR/curl.url" "$FAKE_DIR/curl.fail"
+echo kindle >"$FAKE_DIR/ioreg-mode"; echo 9001 >"$FAKE_DIR/session"
+: >"$LOG"
+env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
+  KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
+  KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
+  KCS_NOTIFY_URL="" KCS_NOTIFY_KEY="$WH_KEY" \
+  bash "$SCRIPT" --now </dev/null >"$TMP/stdout" 2>"$TMP/stderr"
+check "sem KCS_NOTIFY_URL: nao chama o curl" [ ! -f "$FAKE_DIR/curl.body" ]
+
+: >"$FAKE_DIR/calls"; rm -f "$FAKE_DIR/curl.body" "$FAKE_DIR/curl.headers"
+echo 9002 >"$FAKE_DIR/session"
+env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
+  KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
+  KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" \
+  bash "$SCRIPT" --now </dev/null >"$TMP/stdout" 2>"$TMP/stderr"; rc=$?
+check "com URL: sync ok e POST enviado" bash -c '[ "$1" -eq 0 ] && [ -f "$2" ]' _ "$rc" "$FAKE_DIR/curl.body"
+check "payload: status ok, device, my_clippings, totals" \
+  python3 -c 'import json,sys;d=json.load(open(sys.argv[1],encoding="utf-8"));assert d["status"]=="ok" and d["error"] is None;assert d["device"] and d["ran_at"].endswith("-03:00");assert "changed" in d["my_clippings"] and "entries" in d["my_clippings"];assert set(d["totals"])>={"books","annotations","new","changed"};assert isinstance(d["highlights"],list)' "$FAKE_DIR/curl.body"
+check "Authorization Bearer com a chave" grep -qx "Authorization: Bearer $WH_KEY" "$FAKE_DIR/curl.headers"
+check "URL correta" grep -qx "$WH_URL" "$FAKE_DIR/curl.url"
+check "chave nao aparece no log" bash -c '! grep -F "$1" "$2"' _ "$WH_KEY" "$LOG"
+check "log so com o status HTTP" grep -q 'webhook: HTTP 200' "$LOG"
+
+rm -f "$FAKE_DIR/curl.body" "$FAKE_DIR/curl.headers"
+echo 9003 >"$FAKE_DIR/session"
+env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
+  KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
+  KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" KCS_NOTIFY_KEY_HEADER="X-Webhook-Key" \
+  bash "$SCRIPT" --now </dev/null >/dev/null 2>&1
+check "header customizado envia a chave pura" grep -qx "X-Webhook-Key: $WH_KEY" "$FAKE_DIR/curl.headers"
+
+rm -f "$FAKE_DIR/curl.body"
+: >"$LOG"
+env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
+  KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
+  KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" \
+  bash "$SCRIPT" </dev/null >/dev/null 2>&1
+check "conexao ja sincronizada: sem novo POST" [ ! -f "$FAKE_DIR/curl.body" ]
+
+echo 9004 >"$FAKE_DIR/session"; touch "$FAKE_DIR/curl.fail"
+: >"$LOG"
+env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
+  KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
+  KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" \
+  bash "$SCRIPT" --now </dev/null >/dev/null 2>&1; rc=$?
+rm -f "$FAKE_DIR/curl.fail"
+check "falha do webhook nao quebra a sync" [ "$rc" -eq 0 ]
+check "log registra a falha do webhook" grep -q 'webhook: falha ao enviar' "$LOG"
+
+rm -f "$FAKE_DIR/curl.body"
+echo 200 >"$FAKE_DIR/curl.http"
+env KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" KCS_CONFIG="$TMP/nao-existe.env" \
+  bash "$SCRIPT" --test-notify >"$TMP/stdout" 2>"$TMP/stderr"; rc=$?
+check "--test-notify envia status=test" bash -c '[ "$1" -eq 0 ] && python3 -c "import json;d=json.load(open(\"$2\"));assert d[\"status\"]==\"test\""' _ "$rc" "$FAKE_DIR/curl.body"
+check "--test-notify imprime HTTP 200" grep -q 'HTTP 200' "$TMP/stdout"
+
+PY3W="$(command -v python3 || true)"
+if [ -n "$PY3W" ] && "$PY3W" -c 'import sqlite3' 2>/dev/null; then
+  HDEST="$TMP/wh-dest"; HSTATE="$TMP/wh-state"; HCACHE="$TMP/wh-cache"
+  HDEV="$FAKE_DIR/hl-dev"; rm -rf "$HDEST" "$HSTATE" "$HCACHE" "$HDEV"
+  "$PY3W" "$REPO_DIR/tests/fixtures/make-kindle-hl.py" "$HDEV" "$FAKE_DIR/hl-tree" base
+  echo kindle >"$FAKE_DIR/ioreg-mode"; echo 9100 >"$FAKE_DIR/session"
+  rm -f "$FAKE_DIR/curl.body" "$FAKE_DIR/curl.fail"
+  env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$HDEST" KCS_STATE_DIR="$HSTATE" KCS_CACHE_DIR="$HCACHE" \
+    KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
+    KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=1 KCS_PYTHON="$PY3W" \
+    KCS_HIGHLIGHTS_PY="$REPO_DIR/lib/kcs_highlights.py" KCS_KFXLIB_PATH="$FAKES/pylib" \
+    KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" \
+    bash "$SCRIPT" --now </dev/null >/dev/null 2>&1; rc=$?
+  check "webhook com destaques: sync ok" [ "$rc" -eq 0 ]
+  check "payload traz livros, new_highlights e note_file relativo" \
+    python3 -c 'import json,sys;d=json.load(open(sys.argv[1],encoding="utf-8"));assert d["totals"]["books"]>=1 and d["totals"]["new"]>=1;assert d["highlights"];b=d["highlights"][0];
+assert all(k in b for k in ("title","note_file","total_highlights","total_notes","new","changed"));
+assert "Destaques/" in b["note_file"] or b["note_file"].endswith(".md");
+assert d.get("new_highlights");nh=d["new_highlights"][0];assert "text" in nh and "title" in nh;assert len(nh["text"])<=303' "$FAKE_DIR/curl.body"
+  rm -rf "$HDEV" "$FAKE_DIR/hl-tree"
+fi
+
+
 echo "12) install.sh / uninstall.sh (HOME falso, sem launchctl, sem libmtp, sem helper)"
 IHOME="$TMP/ihome"
 mkdir -p "$IHOME"
@@ -532,6 +621,18 @@ check "sem python3: avisa e segue" grep -q 'nao achei python3 >= 3.9' "$TMP/inst
 check "config: KCS_HIGHLIGHTS=auto e KCS_PYTHON no venv" bash -c '[ "$1" = auto ] && [ "$2" = "$3/venv/bin/python" ]' _ "$(cfg KCS_HIGHLIGHTS)" "$(cfg KCS_PYTHON)" "$ILIBEXEC"
 check "nada do kfxlib (GPL) dentro do repositorio" bash -c '! git -C "$1" ls-files | grep -v "^tests/fakes/pylib/" | grep -qi kfxlib/' _ "$REPO_DIR"
 
+
+# Linhas do webhook: o install nao pode apaga-las numa reinstalacao.
+{
+  printf "%s\n" "KCS_NOTIFY_URL='https://hooks.example.test/keep'"
+  printf "%s\n" "KCS_NOTIFY_KEY='chave-preservar'"
+  printf "%s\n" "KCS_NOTIFY_KEY_HEADER='X-Keep'"
+} >>"$ICFG"
+ienv bash "$REPO_DIR/install.sh" >"$TMP/install-wh.out" 2>&1
+check "reinstall preserva KCS_NOTIFY_URL" [ "$(cfg KCS_NOTIFY_URL)" = "https://hooks.example.test/keep" ]
+check "reinstall preserva KCS_NOTIFY_KEY" [ "$(cfg KCS_NOTIFY_KEY)" = "chave-preservar" ]
+check "reinstall preserva KCS_NOTIFY_KEY_HEADER" [ "$(cfg KCS_NOTIFY_KEY_HEADER)" = "X-Keep" ]
+check "reinstall nao imprime a chave do webhook" bash -c '! grep -F "$1" "$2"' _ "chave-preservar" "$TMP/install-wh.out"
 echo "13) Com helper de IOKit (--helper-bin) e libmtp no PATH"
 mkdir -p "$TMP/ibrew"
 for t in mtp-files mtp-folders mtp-getfile mtp-common.sh; do ln -sf "$FAKES/$t" "$TMP/ibrew/$t"; done
