@@ -53,7 +53,7 @@ KCS_MTP_DELAY KCS_MTP_RETRIES KCS_MTP_RETRY_INTERVAL KCS_MTP_TIMEOUT \
 KCS_MTP_RESYNC_SECONDS KCS_MTP_KILL_PTPCAMERAD \
 KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_REQUIRE_MARKER \
 KCS_HIGHLIGHTS KCS_PYTHON \
-KCS_NOTIFY_URL KCS_NOTIFY_KEY KCS_NOTIFY_KEY_HEADER"
+KCS_NOTIFY_URL KCS_NOTIFY_AUTH KCS_NOTIFY_KEY KCS_NOTIFY_KEY_HEADER"
 
 default_for() {
   case "$1" in
@@ -79,6 +79,7 @@ default_for() {
     KCS_HIGHLIGHTS) echo auto ;;
     KCS_PYTHON) echo "$VENV/bin/python" ;;
     KCS_NOTIFY_URL) echo ;;
+    KCS_NOTIFY_AUTH) echo ;;
     KCS_NOTIFY_KEY) echo ;;
     KCS_NOTIFY_KEY_HEADER) echo Authorization ;;
   esac
@@ -495,7 +496,7 @@ echo "Gatilho USB (IOKit): $([ "$USE_HELPER" = 1 ] && echo "ligado (idVendor $KC
 echo "StartInterval: ${KCS_START_INTERVAL}s"
 echo "Destaques do banco (firmware novo): $([ "$KCS_HIGHLIGHTS" = 0 ] && echo desligados || echo "$KCS_HIGHLIGHTS, em $KCS_DEST_SUBDIR/Destaques")"
 if [ -n "$KCS_NOTIFY_URL" ]; then
-  echo "Webhook Grok Bot: configurado (header ${KCS_NOTIFY_KEY_HEADER:-Authorization}; chave nao exibida)"
+  echo "Webhook Grok Bot: configurado (header ${KCS_NOTIFY_KEY_HEADER:-Authorization}; Authorization nao exibido)"
 else
   echo "Webhook Grok Bot: nao configurado (rode: kindle-clippings-sync --setup-notify)"
 fi

@@ -25,9 +25,11 @@
 #   KCS_STATE_DIR           estado interno: hash, sessao USB e lock
 #   KCS_NOTIFY              1 notifica via osascript, 0 desliga (padrao: 1)
 #   KCS_NOTIFY_URL          URL do webhook (Grok Bot routine); vazio = nao envia
-#   KCS_NOTIFY_KEY          chave do webhook (nunca e logada nem impressa)
-#   KCS_NOTIFY_KEY_HEADER   header da chave (padrao: Authorization -> "Bearer <chave>";
-#                           outro nome, ex. X-Webhook-Key, envia a chave pura nesse header)
+#   KCS_NOTIFY_AUTH         valor completo do header Authorization (ex.: "Bearer ..."
+#                           copiado do painel da rotina); nunca e logado nem impresso.
+#                           Se vier so a chave (sem esquema), vira "Bearer <chave>".
+#   KCS_NOTIFY_KEY_HEADER   nome do header HTTP (padrao: Authorization). Override raro.
+#   KCS_NOTIFY_KEY          (legado) se KCS_NOTIFY_AUTH estiver vazio, usa esta chave
 #   KCS_MAX_BACKUPS         manter so os N backups mais recentes; 0 = todos (padrao: 0)
 #  MTP:
 #   KCS_USB_VENDOR_ID       idVendor do Kindle em decimal (padrao: 6473 = 0x1949, Amazon)
@@ -66,7 +68,7 @@ CLIPPINGS_NAME="My Clippings.txt"
 CLIPPINGS_REL="documents/$CLIPPINGS_NAME"
 
 CONFIG_VARS="KCS_VAULT KCS_DEST_SUBDIR KCS_DEST KCS_SOURCE KCS_LOG KCS_STATE_DIR KCS_NOTIFY \
-KCS_NOTIFY_URL KCS_NOTIFY_KEY KCS_NOTIFY_KEY_HEADER \
+KCS_NOTIFY_URL KCS_NOTIFY_AUTH KCS_NOTIFY_KEY KCS_NOTIFY_KEY_HEADER \
 KCS_MAX_BACKUPS KCS_USB_VENDOR_ID KCS_MTP_PULL KCS_MTP_PULL_ARGS KCS_MTP_BIN_DIR KCS_MTP_DELAY KCS_MTP_RETRIES \
 KCS_MTP_RETRY_INTERVAL KCS_MTP_TIMEOUT KCS_MTP_RESYNC_SECONDS KCS_MTP_KILL_PTPCAMERAD \
 KCS_VOLUMES_ROOT KCS_MOUNT_DELAY KCS_RETRIES KCS_RETRY_INTERVAL KCS_MOUNT_WINDOW KCS_REQUIRE_MARKER \
@@ -113,8 +115,13 @@ KCS_LOG="${KCS_LOG:-$HOME/Library/Logs/kindle-clippings-sync.log}"
 KCS_STATE_DIR="${KCS_STATE_DIR:-$HOME/Library/Application Support/kindle-clippings-sync}"
 KCS_NOTIFY="${KCS_NOTIFY:-1}"
 KCS_NOTIFY_URL="${KCS_NOTIFY_URL:-}"
+KCS_NOTIFY_AUTH="${KCS_NOTIFY_AUTH:-}"
 KCS_NOTIFY_KEY="${KCS_NOTIFY_KEY:-}"
 KCS_NOTIFY_KEY_HEADER="${KCS_NOTIFY_KEY_HEADER:-Authorization}"
+# Compat: configs antigas so tinham KCS_NOTIFY_KEY.
+if [ -z "$KCS_NOTIFY_AUTH" ] && [ -n "$KCS_NOTIFY_KEY" ]; then
+  KCS_NOTIFY_AUTH="$KCS_NOTIFY_KEY"
+fi
 KCS_MAX_BACKUPS="${KCS_MAX_BACKUPS:-0}"
 KCS_USB_VENDOR_ID="${KCS_USB_VENDOR_ID:-6473}"
 KCS_MTP_PULL="${KCS_MTP_PULL:-}"
@@ -242,14 +249,16 @@ config_set() {
   chmod 600 "$KCS_CONFIG"
 }
 
-# Header HTTP da chave: Authorization -> "Bearer <chave>"; outro nome -> chave pura.
+# Monta "Nome: valor" do header de auth. O valor em KCS_NOTIFY_AUTH e enviado
+# literalmente; se nao tiver esquema (sem espaco), vira "Bearer <valor>".
+# KCS_NOTIFY_KEY_HEADER troca o nome do header (padrao Authorization).
 notify_auth_header() {
-  local hdr="${KCS_NOTIFY_KEY_HEADER:-Authorization}"
-  if [ "$hdr" = "Authorization" ] || [ "$hdr" = "authorization" ]; then
-    printf '%s: Bearer %s' "$hdr" "$KCS_NOTIFY_KEY"
-  else
-    printf '%s: %s' "$hdr" "$KCS_NOTIFY_KEY"
-  fi
+  local hdr="${KCS_NOTIFY_KEY_HEADER:-Authorization}" val="$KCS_NOTIFY_AUTH"
+  case "$val" in
+    *" "*) ;;                         # ja tem esquema: "Bearer xxx", "Basic yyy"...
+    *) [ -n "$val" ] && val="Bearer $val" ;;
+  esac
+  printf '%s: %s' "$hdr" "$val"
 }
 
 # POST do JSON em $1 para KCS_NOTIFY_URL. Devolve o codigo HTTP em stdout; 000 se curl falhar.
@@ -349,8 +358,8 @@ test_notify() {
     echo "KCS_NOTIFY_URL nao configurada. Rode: kindle-clippings-sync --setup-notify" >&2
     return 1
   fi
-  if [ -z "$KCS_NOTIFY_KEY" ]; then
-    echo "KCS_NOTIFY_KEY nao configurada. Rode: kindle-clippings-sync --setup-notify" >&2
+  if [ -z "$KCS_NOTIFY_AUTH" ]; then
+    echo "KCS_NOTIFY_AUTH nao configurada. Rode: kindle-clippings-sync --setup-notify" >&2
     return 1
   fi
   py="$(notify_python)"
@@ -381,31 +390,40 @@ PY
 }
 
 setup_notify() {
-  local url key hdr
+  local url auth
   echo "Configuracao do aviso no Grok Bot (webhook da rotina)."
-  echo "A URL e a chave ficam so em $KCS_CONFIG (chmod 600); a chave nunca e impressa."
-  printf "URL do webhook: "
+  echo "No painel da rotina: copie a Webhook URL e o valor pronto do 'Authorization header'."
+  echo "URL e Authorization ficam so em $KCS_CONFIG (chmod 600); o Authorization nunca e impresso."
+  printf "Webhook URL: "
   IFS= read -r url || true
   if [ -z "$url" ]; then
     echo "URL vazia; cancelado." >&2
     return 2
   fi
-  printf "Chave (sender key, digitacao oculta): "
-  IFS= read -rs key || true
+  printf "Authorization header (valor completo, digitacao oculta): "
+  IFS= read -rs auth || true
   printf '\n'
-  if [ -z "$key" ]; then
-    echo "Chave vazia; cancelado." >&2
+  if [ -z "$auth" ]; then
+    echo "Authorization vazio; cancelado." >&2
     return 2
   fi
-  printf "Header da chave [%s]: " "${KCS_NOTIFY_KEY_HEADER:-Authorization}"
-  IFS= read -r hdr || true
-  [ -n "$hdr" ] || hdr="${KCS_NOTIFY_KEY_HEADER:-Authorization}"
+  # Aceita colar "Authorization: Bearer xxx" ou so "Bearer xxx" ou so a chave.
+  case "$auth" in
+    [Aa]uthorization:*|[Aa]uthorization[[:space:]]*:*)
+      auth="${auth#*:}"
+      auth="${auth# }"
+      auth="${auth#	}"
+      ;;
+  esac
   config_set KCS_NOTIFY_URL "$url" || return 1
-  config_set KCS_NOTIFY_KEY "$key" || return 1
-  config_set KCS_NOTIFY_KEY_HEADER "$hdr" || return 1
+  config_set KCS_NOTIFY_AUTH "$auth" || return 1
+  # Nao pede o nome do header: o painel entrega o valor de Authorization.
+  # KCS_NOTIFY_KEY_HEADER continua como override manual na config.
+  if ! grep -Eq '^[[:space:]]*(export[[:space:]]+)?KCS_NOTIFY_KEY_HEADER=' "$KCS_CONFIG" 2>/dev/null; then
+    config_set KCS_NOTIFY_KEY_HEADER "Authorization" || return 1
+  fi
   KCS_NOTIFY_URL="$url"
-  KCS_NOTIFY_KEY="$key"
-  KCS_NOTIFY_KEY_HEADER="$hdr"
+  KCS_NOTIFY_AUTH="$auth"
   echo "Salvo. Enviando POST de teste..."
   test_notify
 }

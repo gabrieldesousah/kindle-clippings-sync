@@ -495,7 +495,7 @@ echo kindle >"$FAKE_DIR/ioreg-mode"; echo 9001 >"$FAKE_DIR/session"
 env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
   KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
   KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
-  KCS_NOTIFY_URL="" KCS_NOTIFY_KEY="$WH_KEY" \
+  KCS_NOTIFY_URL="" KCS_NOTIFY_AUTH="$WH_KEY" \
   bash "$SCRIPT" --now </dev/null >"$TMP/stdout" 2>"$TMP/stderr"
 check "sem KCS_NOTIFY_URL: nao chama o curl" [ ! -f "$FAKE_DIR/curl.body" ]
 
@@ -504,12 +504,25 @@ echo 9002 >"$FAKE_DIR/session"
 env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
   KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
   KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
-  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_AUTH="$WH_KEY" \
   bash "$SCRIPT" --now </dev/null >"$TMP/stdout" 2>"$TMP/stderr"; rc=$?
 check "com URL: sync ok e POST enviado" bash -c '[ "$1" -eq 0 ] && [ -f "$2" ]' _ "$rc" "$FAKE_DIR/curl.body"
 check "payload: status ok, device, my_clippings, totals" \
   python3 -c 'import json,sys;d=json.load(open(sys.argv[1],encoding="utf-8"));assert d["status"]=="ok" and d["error"] is None;assert d["device"] and d["ran_at"].endswith("-03:00");assert "changed" in d["my_clippings"] and "entries" in d["my_clippings"];assert set(d["totals"])>={"books","annotations","new","changed"};assert isinstance(d["highlights"],list)' "$FAKE_DIR/curl.body"
-check "Authorization Bearer com a chave" grep -qx "Authorization: Bearer $WH_KEY" "$FAKE_DIR/curl.headers"
+check "Authorization Bearer com a chave (so a key vira Bearer)" grep -qx "Authorization: Bearer $WH_KEY" "$FAKE_DIR/curl.headers"
+
+# Valor completo do painel ("Bearer ...") vai literal
+rm -f "$FAKE_DIR/curl.body" "$FAKE_DIR/curl.headers"
+echo 9002b >"$FAKE_DIR/session"
+WH_AUTH="Bearer token-completo-do-painel"
+env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
+  KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
+  KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_AUTH="$WH_AUTH" \
+  bash "$SCRIPT" --now </dev/null >/dev/null 2>&1
+check "Authorization literal do painel (Bearer ja incluso)" grep -qx "Authorization: $WH_AUTH" "$FAKE_DIR/curl.headers"
+check "auth completo nao aparece no log" bash -c '! grep -F "$1" "$2"' _ "token-completo-do-painel" "$LOG"
+
 check "URL correta" grep -qx "$WH_URL" "$FAKE_DIR/curl.url"
 check "chave nao aparece no log" bash -c '! grep -F "$1" "$2"' _ "$WH_KEY" "$LOG"
 check "log so com o status HTTP" grep -q 'webhook: HTTP 200' "$LOG"
@@ -519,16 +532,16 @@ echo 9003 >"$FAKE_DIR/session"
 env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
   KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
   KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
-  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" KCS_NOTIFY_KEY_HEADER="X-Webhook-Key" \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_AUTH="$WH_KEY" KCS_NOTIFY_KEY_HEADER="X-Webhook-Key" \
   bash "$SCRIPT" --now </dev/null >/dev/null 2>&1
-check "header customizado envia a chave pura" grep -qx "X-Webhook-Key: $WH_KEY" "$FAKE_DIR/curl.headers"
+check "header customizado (KCS_NOTIFY_KEY_HEADER) com o valor de AUTH" grep -qx "X-Webhook-Key: Bearer $WH_KEY" "$FAKE_DIR/curl.headers"
 
 rm -f "$FAKE_DIR/curl.body"
 : >"$LOG"
 env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
   KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
   KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
-  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_AUTH="$WH_KEY" \
   bash "$SCRIPT" </dev/null >/dev/null 2>&1
 check "conexao ja sincronizada: sem novo POST" [ ! -f "$FAKE_DIR/curl.body" ]
 
@@ -537,7 +550,7 @@ echo 9004 >"$FAKE_DIR/session"; touch "$FAKE_DIR/curl.fail"
 env KCS_VOLUMES_ROOT="$TMP/no-volumes" KCS_DEST="$MDEST" KCS_STATE_DIR="$MSTATE" \
   KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
   KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=0 \
-  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" \
+  KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_AUTH="$WH_KEY" \
   bash "$SCRIPT" --now </dev/null >/dev/null 2>&1; rc=$?
 rm -f "$FAKE_DIR/curl.fail"
 check "falha do webhook nao quebra a sync" [ "$rc" -eq 0 ]
@@ -545,7 +558,7 @@ check "log registra a falha do webhook" grep -q 'webhook: falha ao enviar' "$LOG
 
 rm -f "$FAKE_DIR/curl.body"
 echo 200 >"$FAKE_DIR/curl.http"
-env KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" KCS_CONFIG="$TMP/nao-existe.env" \
+env KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_AUTH="$WH_KEY" KCS_CONFIG="$TMP/nao-existe.env" \
   bash "$SCRIPT" --test-notify >"$TMP/stdout" 2>"$TMP/stderr"; rc=$?
 check "--test-notify envia status=test" bash -c '[ "$1" -eq 0 ] && python3 -c "import json;d=json.load(open(\"$2\"));assert d[\"status\"]==\"test\""' _ "$rc" "$FAKE_DIR/curl.body"
 check "--test-notify imprime HTTP 200" grep -q 'HTTP 200' "$TMP/stdout"
@@ -561,7 +574,7 @@ if [ -n "$PY3W" ] && "$PY3W" -c 'import sqlite3' 2>/dev/null; then
     KCS_MTP_BIN_DIR="$FAKES" KCS_MTP_DELAY=0 KCS_MTP_RETRIES=1 KCS_MTP_RETRY_INTERVAL=0 \
     KCS_MTP_TIMEOUT=20 KCS_MTP_POSTCHECK_DELAY=0 KCS_HIGHLIGHTS=1 KCS_PYTHON="$PY3W" \
     KCS_HIGHLIGHTS_PY="$REPO_DIR/lib/kcs_highlights.py" KCS_KFXLIB_PATH="$FAKES/pylib" \
-    KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_KEY="$WH_KEY" \
+    KCS_NOTIFY_URL="$WH_URL" KCS_NOTIFY_AUTH="$WH_KEY" \
     bash "$SCRIPT" --now </dev/null >/dev/null 2>&1; rc=$?
   check "webhook com destaques: sync ok" [ "$rc" -eq 0 ]
   check "payload traz livros, new_highlights e note_file relativo" \
@@ -625,14 +638,14 @@ check "nada do kfxlib (GPL) dentro do repositorio" bash -c '! git -C "$1" ls-fil
 # Linhas do webhook: o install nao pode apaga-las numa reinstalacao.
 {
   printf "%s\n" "KCS_NOTIFY_URL='https://hooks.example.test/keep'"
-  printf "%s\n" "KCS_NOTIFY_KEY='chave-preservar'"
+  printf "%s\n" "KCS_NOTIFY_AUTH='Bearer token-preservar'"
   printf "%s\n" "KCS_NOTIFY_KEY_HEADER='X-Keep'"
 } >>"$ICFG"
 ienv bash "$REPO_DIR/install.sh" >"$TMP/install-wh.out" 2>&1
 check "reinstall preserva KCS_NOTIFY_URL" [ "$(cfg KCS_NOTIFY_URL)" = "https://hooks.example.test/keep" ]
-check "reinstall preserva KCS_NOTIFY_KEY" [ "$(cfg KCS_NOTIFY_KEY)" = "chave-preservar" ]
+check "reinstall preserva KCS_NOTIFY_AUTH" [ "$(cfg KCS_NOTIFY_AUTH)" = "Bearer token-preservar" ]
 check "reinstall preserva KCS_NOTIFY_KEY_HEADER" [ "$(cfg KCS_NOTIFY_KEY_HEADER)" = "X-Keep" ]
-check "reinstall nao imprime a chave do webhook" bash -c '! grep -F "$1" "$2"' _ "chave-preservar" "$TMP/install-wh.out"
+check "reinstall nao imprime o Authorization do webhook" bash -c '! grep -F "$1" "$2"' _ "token-preservar" "$TMP/install-wh.out"
 echo "13) Com helper de IOKit (--helper-bin) e libmtp no PATH"
 mkdir -p "$TMP/ibrew"
 for t in mtp-files mtp-folders mtp-getfile mtp-common.sh; do ln -sf "$FAKES/$t" "$TMP/ibrew/$t"; done

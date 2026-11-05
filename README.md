@@ -149,28 +149,28 @@ Pode rodar o `install.sh` de novo quantas vezes quiser (por exemplo depois de um
 
 Depois de cada sincronização que de fato falou com o Kindle (sucesso ou erro; não nos disparos repetidos da mesma conexão USB), o script pode mandar um resumo em JSON para uma rotina do Grok Bot via webhook.
 
-1. No app do Grok Bot, abra a rotina **"Aviso da sincronização do Kindle"** (ou a que você criou) e copie a **URL do webhook** e a **sender key**.
+1. No app do Grok Bot, abra a rotina **"Aviso da sincronização do Kindle"** (ou a que você criou) e copie a **Webhook URL** e o valor pronto do **Authorization header** (o painel mostra os três: URL, key e o header montado).
 2. No Terminal:
 
 ```bash
 kindle-clippings-sync --setup-notify
 ```
 
-Ele pede a URL (visível), a chave (digitação oculta) e, se quiser, o nome do header HTTP da chave. Grava só essas linhas em `~/.config/kindle-clippings-sync/config.env` (`chmod 600`) e envia um POST de teste (`status: "test"`), mostrando só o código HTTP. Para reenviar o teste depois: `kindle-clippings-sync --test-notify`.
+Ele pede a URL (visível) e o valor completo do Authorization header (digitação oculta). Grava em `~/.config/kindle-clippings-sync/config.env` (`chmod 600`) e envia um POST de teste (`status: "test"`), mostrando só o código HTTP. Para reenviar o teste depois: `kindle-clippings-sync --test-notify`.
 
 Autenticação:
 
 | Variável | Padrão | Efeito |
 | --- | --- | --- |
 | `KCS_NOTIFY_URL` | (vazio) | URL do webhook; vazio = não envia |
-| `KCS_NOTIFY_KEY` | (vazio) | sender key; **nunca** é impressa nem vai para o log |
-| `KCS_NOTIFY_KEY_HEADER` | `Authorization` | com o padrão, o header vai como `Authorization: Bearer <chave>`; se você puser outro nome (ex.: `X-Webhook-Key`), a chave vai pura nesse header |
+| `KCS_NOTIFY_AUTH` | (vazio) | valor completo do header Authorization (ex.: `Bearer ...` copiado do painel); **nunca** é impresso nem vai para o log. Se colar só a chave (sem esquema), o script usa `Bearer <chave>` |
+| `KCS_NOTIFY_KEY_HEADER` | `Authorization` | nome do header HTTP (override raro; o painel entrega o valor de Authorization) |
 
 O POST usa `curl` (timeout 10 s, `--retry 2`). Se o webhook falhar, a sincronização **não** falha: o log registra só `webhook: HTTP NNN` ou `webhook: falha ao enviar`. A chave jamais aparece no log.
 
 Payload (campos principais): `ran_at` (ISO com offset `-03:00`), `device`, `status` (`ok` / `error` / `test`), `error`, `my_clippings` (`changed`, `entries`), `highlights` (lista por livro com `title`, `note_file` relativo ao cofre, totais e contagem de novos/alterados), `totals`, e `new_highlights` (textos novos, até 50, cada um com no máximo ~300 caracteres, com `location` e `chapter` quando existirem).
 
-O `install.sh` preserva essas três variáveis numa reinstalação. Elas **não** são pedidas pelo instalador: use `--setup-notify`.
+O `install.sh` preserva `KCS_NOTIFY_URL`, `KCS_NOTIFY_AUTH` e `KCS_NOTIFY_KEY_HEADER` numa reinstalação. Elas **não** são pedidas pelo instalador: use `--setup-notify`.
 
 ## Desinstalação
 
